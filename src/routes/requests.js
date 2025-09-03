@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const redisClient = require('../db/redis');
 const rideRequestsDb = require('../db/rideRequests');
+const notificationService = require('../services/notificationService');
 
 // Ride request routes for drivers
 
@@ -107,10 +108,21 @@ router.get('/:id', (req, res) => {
 });
 
 // POST /api/requests/:id/accept - Accept a ride request
-router.post('/:id/accept', (req, res) => {
+router.post('/:id/accept', async (req, res) => {
   try {
     const { id } = req.params;
-    const { estimatedArrival } = req.body;
+    const { estimatedArrival, driverId } = req.body;
+    
+    if (!driverId) {
+      return res.status(400).json({ error: 'Driver ID is required' });
+    }
+    
+    // Handle driver response through notification service
+    const accepted = await notificationService.handleDriverResponse(id, driverId, 'accept', estimatedArrival);
+    
+    if (!accepted) {
+      return res.status(400).json({ error: 'Unable to accept request - you may not be the current driver or request may be expired' });
+    }
     
     // TODO: Update request status in database, notify passenger
     res.json({
@@ -118,36 +130,51 @@ router.post('/:id/accept', (req, res) => {
       requestId: id,
       status: 'accepted',
       estimatedArrival: estimatedArrival || 5, // minutes
-      nextAction: 'navigate_to_pickup',
-      passenger: {
-        name: 'Jane Smith',
-        phone: '+1234567890'
-      },
-      pickup: {
-        lat: 40.7128,
-        lng: -74.0060,
-        address: '123 Main St, New York, NY 10001'
-      }
+      nextAction: 'navigate_to_pickup'
     });
   } catch (error) {
+    console.error('Accept request error:', error);
     res.status(500).json({ error: 'Failed to accept request' });
   }
 });
 
 // POST /api/requests/:id/decline - Decline a ride request
-router.post('/:id/decline', (req, res) => {
+router.post('/:id/decline', async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason, driverId } = req.body;
     
-    // TODO: Update request status, log decline reason
+    if (!driverId) {
+      return res.status(400).json({ error: 'Driver ID is required' });
+    }
+    
+    // Handle driver response through notification service
+    const declined = await notificationService.handleDriverResponse(id, driverId, 'decline');
+    
+    if (!declined) {
+      return res.status(400).json({ error: 'Unable to decline request - you may not be the current driver or request may be expired' });
+    }
+    
     res.json({
       message: 'Ride request declined',
       requestId: id,
       reason: reason || 'Not specified'
     });
   } catch (error) {
+    console.error('Decline request error:', error);
     res.status(500).json({ error: 'Failed to decline request' });
+  }
+});
+
+// GET /api/requests/:id/status - Get request status
+router.get('/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const status = await notificationService.getRequestStatus(id);
+    res.json(status);
+  } catch (error) {
+    console.error('Get request status error:', error);
+    res.status(500).json({ error: 'Failed to get request status' });
   }
 });
 
@@ -205,7 +232,7 @@ router.post('/', async (req, res) => {
       dropoff,
       estimatedDistance,
       estimatedDuration,
-      estimatedFare,
+      proposedFare,
       priority
     } = req.body;
     // Validate input (basic)
@@ -246,16 +273,39 @@ router.post('/', async (req, res) => {
       dropoff,
       estimatedDistance,
       estimatedDuration,
-      estimatedFare,
+      proposedFare,
       priority
     });
 
     console.log("nearbyDrivers", nearbyDrivers);
-    // TODO: Notify nearby drivers via FCM/WebSocket
+    
+    // Initialize request status in Redis
+    await redisClient.sendCommand(['SET', `ride:request:${newRequest.id}:status`, 'pending']);
+    await redisClient.sendCommand(['EXPIRE', `ride:request:${newRequest.id}:status`, '600']);
+    
+    // Create driver queue and start processing
+    if (nearbyDrivers.length > 0) {
+      const queueLength = await notificationService.createDriverQueue(newRequest.id, nearbyDrivers);
+      console.log(`Created driver queue with ${queueLength} drivers for request ${newRequest.id}`);
+      
+      // Start processing the queue (non-blocking)
+      setImmediate(() => {
+        notificationService.processDriverQueue(newRequest.id, {
+          pickup,
+          dropoff,
+          proposedFare,
+          estimatedDistance,
+          estimatedDuration,
+          passengerName
+        });
+      });
+    }
+    
     res.status(201).json({
       message: 'Ride request created',
       request: newRequest,
-      nearbyDrivers
+      nearbyDrivers: nearbyDrivers.length,
+      status: 'pending'
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to create ride request', details: error.message });

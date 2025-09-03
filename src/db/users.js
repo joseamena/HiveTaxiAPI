@@ -95,6 +95,17 @@ async function updateUserById(id, updates) {
 }
 
 /**
+ * Get a user by id
+ */
+async function getUserById(id) {
+  const result = await pool.query(
+    `SELECT * FROM users WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+/**
  * Delete a user by hiveUsername
  */
 async function deleteUser(hiveUsername) {
@@ -118,6 +129,7 @@ async function listUsers(type) {
 module.exports = {
   createUser,
   getUserByUsername,
+  getUserById,
   updateUser,
   updateUserById,
   deleteUser,

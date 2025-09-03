@@ -12,7 +12,7 @@ async function createRideRequest({
   dropoff,
   estimatedDistance,
   estimatedDuration,
-  estimatedFare,
+  proposedFare,
   priority = 'normal',
   requestTime = new Date().toISOString(),
   status = 'pending'
@@ -22,7 +22,7 @@ async function createRideRequest({
       passenger_id, passenger_name, passenger_phone,
       pickup_lat, pickup_lng, pickup_address,
       dropoff_lat, dropoff_lng, dropoff_address,
-      estimated_distance, estimated_duration, estimated_fare,
+      estimated_distance, estimated_duration, proposed_fare,
       priority, request_time, status
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
     RETURNING *`,
@@ -38,7 +38,7 @@ async function createRideRequest({
       dropoff.address,
       estimatedDistance,
       estimatedDuration,
-      estimatedFare,
+      proposedFare,
       priority,
       requestTime,
       status
