@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const redisClient = require('../db/redis');
+const rideRequestsDb = require('../db/rideRequests');
 
 // Ride request routes for drivers
 
@@ -188,6 +190,75 @@ router.get('/history', (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch request history' });
+  }
+});
+
+// POST /api/requests - Rider creates a new ride request
+router.post('/', async (req, res) => {
+  console.log("requests", req.body);
+  try {
+    const {
+      passengerId,
+      passengerName,
+      passengerPhone,
+      pickup,
+      dropoff,
+      estimatedDistance,
+      estimatedDuration,
+      estimatedFare,
+      priority
+    } = req.body;
+    // Validate input (basic)
+    if (!pickup || !pickup.lat || !pickup.lng) {
+      return res.status(400).json({ error: 'Pickup location required' });
+    }
+    // Find nearby drivers using Redis GEO
+    let nearbyDrivers = [];
+    try {
+      const drivers = await redisClient.sendCommand([
+        'GEORADIUS',
+        'drivers:online',
+        pickup.lng.toString(),
+        pickup.lat.toString(),
+        '5',
+        'km',
+        'WITHDIST',
+        'WITHCOORD',
+        'COUNT',
+        '10',
+        'ASC'
+      ]);
+      nearbyDrivers = drivers.map(([member, distance, [lng, lat]]) => ({
+        driverId: member.replace('driver:', ''),
+        distance: parseFloat(distance),
+        latitude: parseFloat(lat),
+        longitude: parseFloat(lng)
+      }));
+    } catch (err) {
+      console.error('Redis georadius error:', err);
+    }
+    // Save to database
+    const newRequest = await rideRequestsDb.createRideRequest({
+      passengerId,
+      passengerName,
+      passengerPhone,
+      pickup,
+      dropoff,
+      estimatedDistance,
+      estimatedDuration,
+      estimatedFare,
+      priority
+    });
+
+    console.log("nearbyDrivers", nearbyDrivers);
+    // TODO: Notify nearby drivers via FCM/WebSocket
+    res.status(201).json({
+      message: 'Ride request created',
+      request: newRequest,
+      nearbyDrivers
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create ride request', details: error.message });
   }
 });
 

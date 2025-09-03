@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 require('dotenv').config();
+const pool = require('./db');
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/drivers', require('./routes/drivers'));
 app.use('/api/requests', require('./routes/requests'));
 app.use('/api/trips', require('./routes/trips'));
+app.use('/api/users', require('./routes/users'));
 
 // 404 handler
 app.use((req, res) => {

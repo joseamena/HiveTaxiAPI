@@ -1,7 +1,11 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { Client, PublicKey } = require('@hiveio/dhive');
+const { Client, PublicKey, Signature } = require('@hiveio/dhive');
+const elliptic = require('elliptic');
+const EC = elliptic.ec;
+const ec = new EC('secp256k1');
+const userDb = require('../db/users');
 
 const router = express.Router();
 
@@ -119,8 +123,8 @@ router.post('/forgot-password', (req, res) => {
 
 // HIVE BLOCKCHAIN AUTHENTICATION ROUTES
 
-// POST /api/auth/hive/challenge - Get authentication challenge for Hive login
-router.post('/hive/challenge', async (req, res) => {
+// POST /api/auth/challenge - Get authentication challenge for Hive login
+router.post('/challenge', async (req, res) => {
   try {
     const { username } = req.body;
 
@@ -163,8 +167,8 @@ router.post('/hive/challenge', async (req, res) => {
   }
 });
 
-// POST /api/auth/hive/verify - Verify signed challenge and login with Hive
-router.post('/hive/verify', async (req, res) => {
+// POST /api/auth/verify - Verify signed challenge and login with Hive
+router.post('/verify', async (req, res) => {
   try {
     const { username, challenge, timestamp, signature } = req.body;
 
@@ -201,16 +205,38 @@ router.post('/hive/verify', async (req, res) => {
 
     // Verify signature
     const message = `${username}:${challenge}:${timestamp}`;
+    console.log('🔏 Message:', message);
+    console.log('🔏 Signature (hex):', signature);
+    const messageHash = crypto.createHash('sha256').update(message, 'utf8').digest();
+    console.log('🔏 Message SHA-256 (hex):', messageHash.toString('hex'));
+    let signatureBuffer;
+    try {
+      signatureBuffer = Buffer.from(signature, 'hex');
+      console.log('Signature buffer length:', signatureBuffer.length);
+    } catch (e) {
+      console.error('Error converting signature to buffer:', e);
+      return res.status(400).json({ error: 'Invalid signature format' });
+    }
     let isValidSignature = false;
 
     for (const pubKeyString of postingKeys) {
+      console.log('🔑 Verifying with public key:', pubKeyString);
       try {
-        const publicKey = PublicKey.fromString(pubKeyString);
-        const isValid = publicKey.verify(
-          Buffer.from(message, 'utf8'),
-          Buffer.from(signature, 'hex')
-        );
-        
+        // Decode STM... key to compressed buffer using dhive
+        const dhivePubKey = PublicKey.fromString(pubKeyString);
+        const compressedHex = dhivePubKey.key.toString('hex');
+        console.log('Public key hex:', compressedHex);
+        const key = ec.keyFromPublic(compressedHex, 'hex');
+        const hashHex = messageHash.toString('hex');
+        const sig = {
+          r: signatureBuffer.slice(0, 32).toString('hex'),
+          s: signatureBuffer.slice(32, 64).toString('hex'),
+          recoveryParam: signatureBuffer[64]
+        };
+        console.log('r:', sig.r);
+        console.log('s:', sig.s);
+        console.log('recoveryParam:', sig.recoveryParam);
+        const isValid = key.verify(hashHex, sig);
         if (isValid) {
           isValidSignature = true;
           break;
@@ -246,15 +272,17 @@ router.post('/hive/verify', async (req, res) => {
     res.json({
       message: 'Hive authentication successful',
       token,
-      driver: {
+      user: {
         id: driver.id,
-        username: driver.username,
         hiveAccount: {
           name: account.name,
           reputation: account.reputation,
           created: account.created
         },
-        status: driver.status,
+        displayName: driver.display_name || `${account.name}`,
+        licenseNumber: driver.license_number,
+        phoneNumber: driver.phone_number,
+        verificationStatus: driver.verification_status || 'pending_verification',
         authMethod: 'hive'
       }
     });
@@ -266,29 +294,31 @@ router.post('/hive/verify', async (req, res) => {
 });
 
 // Helper function to find or create driver from Hive account
-async function findOrCreateDriver(username, hiveAccount) {
-  // TODO: Implement your database logic here
-  // This is a mock implementation for now
-  
-  const existingDriver = {
-    id: `hive_${username}`,
-    username: username,
-    status: 'pending_verification',
-    authMethod: 'hive',
-    hiveData: hiveAccount,
-    createdAt: new Date().toISOString(),
-    lastLogin: new Date().toISOString()
-  };
+async function findOrCreateDriver(username) {
+  // Try to find driver by Hive username
 
-  // In production, you would:
-  // 1. Check if driver exists in your database by username
-  // 2. If not, create new driver record
-  // 3. If exists, update lastLogin and hiveData
-  // 4. Return the driver object
-  
-  console.log(`Driver authenticated via Hive: ${username}`);
-  
-  return existingDriver;
+  let user = await userDb.getUserByUsername(username);
+  if (user && user.type === 'driver') {
+    // Update lastLogin and hiveData (if you have such columns)
+    // For now, just return the driver
+    return user;
+  }
+  // Create new driver
+  driver = await userDb.createUser({
+    hiveUsername: username,
+    type: 'driver',
+    completedTrips: 0,
+    rating: 0,
+    licenseNumber: null,
+    lastLat: null,
+    lastLong: null,
+    phoneNumber: null,
+    displayName: null,
+    vehicle: null,
+    isOnline: false
+  });
+
+  return driver;
 }
 
 module.exports = router;
