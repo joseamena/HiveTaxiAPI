@@ -1,68 +1,66 @@
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+const authenticateJWT = require('../middleware/auth');
+
+const rideRequestsDb = require('../db/rideRequests');
 
 // Trip management routes
 
-// GET /api/trips/active - Get current active trip
-router.get('/active', (req, res) => {
+// GET /api/trips/active - Get current active trip for authenticated driver
+router.get('/active', authenticateJWT, async (req, res) => {
   try {
-    // TODO: Fetch active trip from database
-    const activeTrip = {
-      id: 'trip_001',
-      requestId: 'req_001',
-      status: 'in_progress', // waiting_for_pickup, in_progress, completed
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    if (!driverId) {
+      return res.status(400).json({ error: 'Driver ID not found in token' });
+    }
+    // Find active ride request for this driver
+    const activeRequest = await rideRequestsDb.getActiveRideRequestForDriver(driverId);
+    if (!activeRequest) {
+      return res.json({ active: false, trip: null });
+    }
+    // Construct Trip object
+    const trip = {
+      requestId: activeRequest.id,
+      status: activeRequest.status,
       passenger: {
-        id: 'pass_123',
-        name: 'Jane Smith',
-        phone: '+1234567890',
-        rating: 4.9
+        id: activeRequest.passenger_id,
+        name: activeRequest.passenger_name,
+        phone: activeRequest.passenger_phone || ''
       },
       pickup: {
-        lat: 40.7128,
-        lng: -74.0060,
-        address: '123 Main St, New York, NY 10001',
-        arrivedAt: '2025-07-20T10:30:00Z'
+        latitude: activeRequest.pickup_lat,
+        longitude: activeRequest.pickup_lng,
+        address: activeRequest.pickup_address
       },
       dropoff: {
-        lat: 40.7589,
-        lng: -73.9851,
-        address: '456 Broadway, New York, NY 10013'
+        latitude: activeRequest.dropoff_lat,
+        longitude: activeRequest.dropoff_lng,
+        address: activeRequest.dropoff_address
       },
-      fare: {
-        baseFare: 15.00,
-        distance: 3.2,
-        duration: 12,
-        total: 18.50
-      },
-      startedAt: '2025-07-20T10:35:00Z',
-      estimatedArrival: '2025-07-20T10:47:00Z'
+      finalFare: activeRequest.final_fare || activeRequest.proposed_fare || null
     };
-
-    res.json(activeTrip);
+    res.json({ active: true, trip });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch active trip' });
   }
 });
 
 // POST /api/trips/:id/start - Start a trip (passenger picked up)
-router.post('/:id/start', (req, res) => {
+router.post('/:id/start', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const { odometerReading, passengerConfirmed } = req.body;
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
     
-    if (!passengerConfirmed) {
-      return res.status(400).json({
-        error: 'Passenger confirmation required to start trip'
-      });
-    }
-
-    // TODO: Update trip status in database
+    // Update trip status in database
+    await rideRequestsDb.updateRideRequestStatus(id, 'in_transit');
+    
     res.json({
-      message: 'Trip started successfully',
       tripId: id,
-      status: 'in_progress',
-      startedAt: new Date().toISOString(),
-      odometerReading: odometerReading || null,
+      status: 'in_transit',
+      timestamp: new Date().toISOString(),
+      driverId,
       nextAction: 'navigate_to_dropoff'
     });
   } catch (error) {
@@ -71,7 +69,7 @@ router.post('/:id/start', (req, res) => {
 });
 
 // POST /api/trips/:id/complete - Complete a trip
-router.post('/:id/complete', (req, res) => {
+router.post('/:id/complete', async (req, res) => {
   try {
     const { id } = req.params;
     const { 
@@ -81,28 +79,20 @@ router.post('/:id/complete', (req, res) => {
       tolls = 0,
       notes 
     } = req.body;
-    
-    // TODO: Calculate final fare, update database
-    const finalFare = {
-      baseFare: 15.00,
-      distanceFare: actualDistance * 2.50,
-      timeFare: 12 * 0.45,
-      waitTime: waitTime * 0.30,
-      tolls: tolls,
-      subtotal: 18.50,
-      tip: 0,
-      total: 18.50
-    };
-
+    // Update trip status in database
+    await rideRequestsDb.updateRideRequestStatus(id, 'completed');
+    // Get ride request from DB to obtain proposedFare
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    const finalFare = rideRequest ? rideRequest.proposed_fare : null;
     res.json({
       message: 'Trip completed successfully',
       tripId: id,
       status: 'completed',
       completedAt: new Date().toISOString(),
-      fareBreakdown: finalFare,
+      finalFare,
       distance: actualDistance || 3.2,
       duration: 12, // minutes
-      earnings: finalFare.total * 0.8, // 80% to driver
+      earnings: finalFare ? finalFare * 0.8 : null, // 80% to driver
       notes: notes || null
     });
   } catch (error) {
@@ -279,19 +269,16 @@ router.get('/:id', (req, res) => {
 });
 
 // POST /api/trips/:id/arrived - Mark arrival at pickup location
-router.post('/:id/arrived', (req, res) => {
+router.post('/:id/arrived', authenticateJWT,(req, res) => {
   try {
     const { id } = req.params;
     const { lat, lng } = req.body;
     
+
     // TODO: Verify location proximity, update trip status
     res.json({
-      message: 'Arrival confirmed',
-      tripId: id,
-      status: 'waiting_for_pickup',
-      arrivedAt: new Date().toISOString(),
-      location: { lat, lng },
-      waitTimeStarted: true
+      status: 'arrived_at_pickup',
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to confirm arrival' });

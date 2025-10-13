@@ -3,6 +3,24 @@ const router = express.Router();
 const redisClient = require('../db/redis');
 const rideRequestsDb = require('../db/rideRequests');
 const notificationService = require('../services/notificationService');
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+
+// JWT authentication middleware
+function authenticateJWT(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization header missing or invalid' });
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
 
 // Ride request routes for drivers
 
@@ -108,30 +126,55 @@ router.get('/:id', (req, res) => {
 });
 
 // POST /api/requests/:id/accept - Accept a ride request
-router.post('/:id/accept', async (req, res) => {
+router.post('/:id/accept', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const { estimatedArrival, driverId } = req.body;
-    
+    const { estimatedArrival } = req.body;
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
     if (!driverId) {
-      return res.status(400).json({ error: 'Driver ID is required' });
+      return res.status(400).json({ error: 'Driver ID not found in token' });
     }
-    
     // Handle driver response through notification service
-    const accepted = await notificationService.handleDriverResponse(id, driverId, 'accept', estimatedArrival);
-    
+    const accepted = await notificationService.handleDriverResponse(id, String(driverId), 'accept', estimatedArrival);
     if (!accepted) {
       return res.status(400).json({ error: 'Unable to accept request - you may not be the current driver or request may be expired' });
     }
-    
-    // TODO: Update request status in database, notify passenger
-    res.json({
-      message: 'Ride request accepted',
-      requestId: id,
+
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    if (!rideRequest) {
+      return res.status(404).json({ error: 'Ride request not found' });
+    }
+    // Update status in database and Redis
+    await rideRequestsDb.updateRideRequestStatus(id, 'accepted');
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'accepted']);
+
+    console.log('Ride request found:', rideRequest);
+    // Construct Trip object with camelCase keys
+    const trip = {
+      passengerPhone: rideRequest.passenger_phone,
+      passengerId: rideRequest.passenger_id,
+      passengerName: rideRequest.passenger_name,
+      pickup: {
+        address: rideRequest.pickup_address,
+        latitude: rideRequest.pickup_lat,
+        longitude: rideRequest.pickup_lng,
+        name: rideRequest.pickup_name || ''
+      },
+      destination: {
+        address: rideRequest.dropoff_address,
+        latitude: rideRequest.dropoff_lat,
+        longitude: rideRequest.dropoff_lng,
+        name: rideRequest.dropoff_name || ''
+      },
+      distance: rideRequest.estimated_distance,
+      duration: rideRequest.estimated_duration,
+      finalFare: rideRequest.proposed_fare,
+      priority: rideRequest.priority,
+      requestTime: rideRequest.request_time,
       status: 'accepted',
-      estimatedArrival: estimatedArrival || 5, // minutes
-      nextAction: 'navigate_to_pickup'
-    });
+      id: rideRequest.id
+    };
+    res.json(trip);
   } catch (error) {
     console.error('Accept request error:', error);
     res.status(500).json({ error: 'Failed to accept request' });
@@ -221,7 +264,7 @@ router.get('/history', (req, res) => {
 });
 
 // POST /api/requests - Rider creates a new ride request
-router.post('/', async (req, res) => {
+router.post('/', authenticateJWT, async (req, res) => {
   console.log("requests", req.body);
   try {
     const {
@@ -235,6 +278,9 @@ router.post('/', async (req, res) => {
       proposedFare,
       priority
     } = req.body;
+
+    console.log("authenticated user:", req.user);
+    
     // Validate input (basic)
     if (!pickup || !pickup.lat || !pickup.lng) {
       return res.status(400).json({ error: 'Pickup location required' });
@@ -264,6 +310,18 @@ router.post('/', async (req, res) => {
     } catch (err) {
       console.error('Redis georadius error:', err);
     }
+    // Filter out stale drivers (those without a valid last-seen key in Redis)
+    const freshDrivers = [];
+    for (const driver of nearbyDrivers) {
+      const lastSeenKey = `driver:last_seen:${driver.driverId}`;
+      const lastSeen = await redisClient.sendCommand(['GET', lastSeenKey]);
+      if (lastSeen) {
+        freshDrivers.push(driver);
+      } else {
+        // Remove stale driver from Redis GEO set
+        await redisClient.sendCommand(['ZREM', 'drivers:online', `driver:${driver.driverId}`]);
+      }
+    }
     // Save to database
     const newRequest = await rideRequestsDb.createRideRequest({
       passengerId,
@@ -277,15 +335,15 @@ router.post('/', async (req, res) => {
       priority
     });
 
-    console.log("nearbyDrivers", nearbyDrivers);
+    console.log("nearbyDrivers", freshDrivers);
     
     // Initialize request status in Redis
     await redisClient.sendCommand(['SET', `ride:request:${newRequest.id}:status`, 'pending']);
     await redisClient.sendCommand(['EXPIRE', `ride:request:${newRequest.id}:status`, '600']);
     
     // Create driver queue and start processing
-    if (nearbyDrivers.length > 0) {
-      const queueLength = await notificationService.createDriverQueue(newRequest.id, nearbyDrivers);
+    if (freshDrivers.length > 0) {
+      const queueLength = await notificationService.createDriverQueue(newRequest.id, freshDrivers);
       console.log(`Created driver queue with ${queueLength} drivers for request ${newRequest.id}`);
       
       // Start processing the queue (non-blocking)
@@ -296,17 +354,15 @@ router.post('/', async (req, res) => {
           proposedFare,
           estimatedDistance,
           estimatedDuration,
-          passengerName
+          passengerName,
+          passengerPhone,
+          passengerId,
+          priority
         });
       });
     }
     
-    res.status(201).json({
-      message: 'Ride request created',
-      request: newRequest,
-      nearbyDrivers: nearbyDrivers.length,
-      status: 'pending'
-    });
+    res.status(201).json({ rideRequest: newRequest });
   } catch (error) {
     res.status(500).json({ error: 'Failed to create ride request', details: error.message });
   }

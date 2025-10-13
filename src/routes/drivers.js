@@ -102,6 +102,9 @@ router.post('/location', authenticateJWT, async (req, res) => {
       latitude: latitude,
       member: `driver:${driverId}`
     });
+    // Set/update last seen timestamp for this driver (as a separate key with 5 min TTL)
+    await redisClient.sendCommand(['SET', `driver:last_seen:${driverId}`, Date.now().toString()]);
+    await redisClient.sendCommand(['EXPIRE', `driver:last_seen:${driverId}`, '300']);
     // TODO: Update location in database
     // await userDb.updateUserById(driverId, { last_lat: latitude, last_long: longitude });
     res.json({
@@ -118,27 +121,22 @@ router.post('/location', authenticateJWT, async (req, res) => {
   }
 });
 
-// PUT /api/drivers/online-status - Set driver online status
+// PUT /api/drivers/online-status - Set driver online/offline in Redis only
 router.put('/online-status', authenticateJWT, async (req, res) => {
   try {
     const driverId = req.user.driverId;
-
     const { isOnline } = req.body;
-    
     if (typeof isOnline !== 'boolean') {
-      return res.status(400).json({
-        error: 'isOnline must be a boolean value'
-      });
+      return res.status(400).json({ error: 'isOnline must be a boolean value' });
     }
-
-    // Update online status in database
-    try {
-      await userDb.updateUserById(driverId, { is_online: isOnline });
-    } catch (dbError) {
-      console.error('Database update error:', dbError);
-      return res.status(500).json({ error: 'Status update failed', details: dbError.message });
+    if (!isOnline) {
+      // Remove driver from Redis GEO set
+      await redisClient.zRem('drivers:online', `driver:${driverId}`);
+      console.log(`Driver ${driverId} set to offline and removed from Redis.`);
+    } else {
+      // Do nothing, location updates handle online status
+      console.log(`Driver ${driverId} set to online (no Redis action, handled by location updates).`);
     }
-
     return res.sendStatus(200);
   } catch (error) {
     console.error('Online status update error:', error);
@@ -232,8 +230,6 @@ router.get('/nearby', async (req, res) => {
     if (!latitude || !longitude) {
       return res.status(400).json({ error: 'latitude and longitude are required' });
     }
-    // Use Redis GEOSEARCH (or GEORADIUS for older Redis)
-    // Note: redisClient.geoRadius or geoSearch depending on your redis client version
     let drivers;
     try {
       drivers = await redisClient.georadius(
@@ -252,16 +248,27 @@ router.get('/nearby', async (req, res) => {
       console.error('Redis georadius error:', err);
       return res.status(500).json({ error: 'Failed to query nearby drivers' });
     }
-    // Format response
-    const result = drivers.map(([member, distance, [lng, lat]]) => ({
-      driverId: member.replace('driver:', ''),
-      distance: parseFloat(distance),
-      latitude: parseFloat(lat),
-      longitude: parseFloat(lng)
-    }));
+    // Filter out drivers with stale last_seen
+    const now = Date.now();
+    const filtered = [];
+    for (const [member, distance, [lng, lat]] of drivers) {
+      const driverId = member.replace('driver:', '');
+      const lastSeen = await redisClient.sendCommand(['GET', `driver:last_seen:${driverId}`]);
+      if (!lastSeen || now - parseInt(lastSeen) > 5 * 60 * 1000) {
+        // Remove from Redis GEO set if stale
+        await redisClient.zRem('drivers:online', member);
+        continue;
+      }
+      filtered.push({
+        driverId,
+        distance: parseFloat(distance),
+        latitude: parseFloat(lat),
+        longitude: parseFloat(lng)
+      });
+    }
     res.json({
-      drivers: result,
-      count: result.length,
+      drivers: filtered,
+      count: filtered.length,
       search: { latitude: parseFloat(latitude), longitude: parseFloat(longitude), radius: parseFloat(radius), unit, limit: parseInt(limit) }
     });
   } catch (error) {

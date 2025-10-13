@@ -170,7 +170,7 @@ router.post('/challenge', async (req, res) => {
 // POST /api/auth/verify - Verify signed challenge and login with Hive
 router.post('/verify', async (req, res) => {
   try {
-    const { username, challenge, timestamp, signature } = req.body;
+    const { username, challenge, timestamp, signature, type } = req.body;
 
     if (!username || !challenge || !timestamp || !signature) {
       return res.status(400).json({ 
@@ -255,7 +255,7 @@ router.post('/verify', async (req, res) => {
     challenges.delete(username);
 
     // Create or update driver in your system
-    const driver = await findOrCreateDriver(username, account);
+    const driver = await findOrCreateUser(username, type);
 
     // Generate JWT token
     const token = jwt.sign(
@@ -293,20 +293,19 @@ router.post('/verify', async (req, res) => {
   }
 });
 
-// Helper function to find or create driver from Hive account
-async function findOrCreateDriver(username) {
-  // Try to find driver by Hive username
-
+// Helper function to find or create user from Hive account
+async function findOrCreateUser(username, type = 'driver') {
+  // Try to find user by Hive username
   let user = await userDb.getUserByUsername(username);
-  if (user && user.type === 'driver') {
+  if (user && user.type === type) {
     // Update lastLogin and hiveData (if you have such columns)
-    // For now, just return the driver
+    // For now, just return the user
     return user;
   }
-  // Create new driver
-  driver = await userDb.createUser({
+  // Create new user
+  const newUser = await userDb.createUser({
     hiveUsername: username,
-    type: 'driver',
+    type,
     completedTrips: 0,
     rating: 0,
     licenseNumber: null,
@@ -314,11 +313,10 @@ async function findOrCreateDriver(username) {
     lastLong: null,
     phoneNumber: null,
     displayName: null,
-    vehicle: null,
+    vehicle: type === 'driver' ? null : undefined,
     isOnline: false
   });
-
-  return driver;
+  return newUser;
 }
 
 module.exports = router;

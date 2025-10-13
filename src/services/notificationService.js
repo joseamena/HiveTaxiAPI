@@ -54,6 +54,10 @@ class NotificationService {
       // Update status to no_drivers_available
       await redisClient.sendCommand(['SET', statusKey, 'no_drivers_available']);
       await redisClient.sendCommand(['EXPIRE', statusKey, '600']);
+      // Notify rider
+      if (rideDetails) {
+        await this.sendRiderNoDriverNotification(requestId, rideDetails);
+      }
       return;
     }
     
@@ -103,6 +107,8 @@ class NotificationService {
       console.log(`Driver ${driverId} timed out for request ${requestId}, moving to next driver`);
       // Log the timeout
       await this.logDriverResponse(requestId, driverId, 'timeout');
+      // Notify driver of expiration
+      await this.sendDriverRequestExpiredNotification(driverId, requestId);
       // Process next driver
       this.processDriverQueue(requestId, rideDetails);
     }
@@ -112,6 +118,10 @@ class NotificationService {
    * Send FCM notification to driver
    */
   async sendDriverNotification(driverId, requestId, rideDetails) {
+    console.log(`Sending FCM to driver ${driverId} for request ${requestId}`);
+    console.log(rideDetails);
+    // For debugging
+    console.log('rideDetails:', rideDetails);
     // Get driver's FCM token
     const driver = await userDb.getUserById ? 
       await userDb.getUserById(driverId) : 
@@ -121,22 +131,38 @@ class NotificationService {
       console.log(`Driver ${driverId} has no FCM token`);
       return;
     }
-    console.log(`ride details: ${rideDetails}`);
+    // Construct trip object for notification
+    const trip = {
+      passengerPhone: rideDetails.passengerPhone,
+      passengerId: rideDetails.passengerId || rideDetails.passenger_id,
+      passengerName: rideDetails.passengerName || rideDetails.passenger_name,
+      pickupLocation: {
+        address: rideDetails.pickup?.address || rideDetails.pickup_address,
+        latitude: rideDetails.pickup?.lat || rideDetails.pickup_lat,
+        longitude: rideDetails.pickup?.lng || rideDetails.pickup_lng,
+        name: rideDetails.pickup?.name || rideDetails.pickup_name || ''
+      },
+      dropoffLocation: {
+        address: rideDetails.dropoff?.address || rideDetails.dropoff_address,
+        latitude: rideDetails.dropoff?.lat || rideDetails.dropoff_lat,
+        longitude: rideDetails.dropoff?.lng || rideDetails.dropoff_lng,
+        name: rideDetails.dropoff?.name || rideDetails.dropoff_name || ''
+      },
+      distance: rideDetails.estimatedDistance || rideDetails.estimated_distance,
+      duration: rideDetails.estimatedDuration || rideDetails.estimated_duration,
+      priority: rideDetails.priority,
+      proposedFare: rideDetails.proposedFare || rideDetails.proposed_fare
+    };
+    console.log('trip details:', trip);
     const message = {
       token: driver.fcm_token,
       notification: {
         title: 'New Ride Request',
-        body: `Pickup at ${rideDetails.pickup.address}`
+        body: `Pickup at ${trip.pickupLocation.address}`
       },
       data: {
         requestId: requestId.toString(),
-        pickupLat: rideDetails.pickup.lat.toString(),
-        pickupLng: rideDetails.pickup.lng.toString(),
-        pickupAddress: rideDetails.pickup.address || '',
-        dropoffLat: rideDetails.dropoff.lat.toString(),
-        dropoffLng: rideDetails.dropoff.lng.toString(),
-        dropoffAddress: rideDetails.dropoff.address || '',
-        proposedFare: rideDetails.proposedFare.toString(),
+        trip: JSON.stringify(trip),
         type: 'ride_request'
       },
       android: {
@@ -162,7 +188,89 @@ class NotificationService {
     console.log(`[MOCK FCM] Notifying driver ${driverId} for request ${requestId}`);
     console.log(`Pickup: ${rideDetails.pickup.address}`);
     console.log(`Dropoff: ${rideDetails.dropoff.address}`);
-    console.log(`Fare: $${rideDetails.estimatedFare}`);
+    console.log(`Fare: $${rideDetails.proposedFare}`);
+  }
+
+  /**
+   * Send FCM notification to rider when no drivers are available
+   */
+  async sendRiderNoDriverNotification(requestId, rideDetails) {
+    console.log(`Notifying rider ${rideDetails.passengerName} of no available drivers for request ${requestId}`);
+    // Get rider's FCM token
+    const rider = await userDb.getUserById ? 
+      await userDb.getUserById(rideDetails.passengerId) : 
+      await userDb.getUserByUsername(rideDetails.passengerId);
+    if (!rider || !rider.fcm_token) {
+      console.log(`Rider not found or doesn't have FCM token`);
+      return;
+    }
+    const message = {
+      token: rider.fcm_token,
+      notification: {
+        title: 'No Drivers Available',
+        body: 'Sorry, no drivers are available for your request at this time.'
+      },
+      data: {
+        requestId: requestId.toString(),
+        type: 'no_drivers_available'
+      },
+      android: {
+        priority: 'high',
+        ttl: 60000
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10'
+        },
+        payload: {
+          aps: {
+            sound: 'default'
+          }
+        }
+      }
+    };
+    const response = await admin.messaging().send(message);
+    console.log(`FCM sent to rider ${passengerId} for no drivers:`, response);
+  }
+
+  /**
+   * Send FCM notification to driver when ride request expires or is unavailable
+   */
+  async sendDriverRequestExpiredNotification(driverId, requestId) {
+    const driver = await userDb.getUserById ? 
+      await userDb.getUserById(driverId) : 
+      await userDb.getUserByUsername(driverId);
+    if (!driver || !driver.fcm_token) {
+      console.log(`Driver ${driverId} has no FCM token`);
+      return;
+    }
+    const message = {
+      token: driver.fcm_token,
+      notification: {
+        title: 'Ride Request Expired',
+        body: 'This ride request is no longer available.'
+      },
+      data: {
+        requestId: requestId.toString(),
+        type: 'ride_request_expired'
+      },
+      android: {
+        priority: 'high',
+        ttl: 60000
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10'
+        },
+        payload: {
+          aps: {
+            sound: 'default'
+          }
+        }
+      }
+    };
+    const response = await admin.messaging().send(message);
+    console.log(`FCM sent to driver ${driverId} for expired request:`, response);
   }
 
   /**
@@ -174,6 +282,7 @@ class NotificationService {
     
     // Check if this driver is the current one
     const currentDriver = await redisClient.sendCommand(['GET', currentDriverKey]);
+    console.log(`Current driver for request ${requestId} is ${currentDriver}, response from ${driverId}`);
     if (currentDriver !== driverId) {
       console.log(`Driver ${driverId} is not the current driver for request ${requestId}`);
       return false;

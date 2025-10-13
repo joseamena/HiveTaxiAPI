@@ -47,6 +47,42 @@ async function createRideRequest({
   return result.rows[0];
 }
 
+/**
+ * Get a ride request by ID
+ */
+async function getRideRequestById(id) {
+  const result = await pool.query(
+    `SELECT * FROM ride_requests WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+/**
+ * Update ride request status by ID
+ */
+async function updateRideRequestStatus(id, status) {
+  const result = await pool.query(
+    `UPDATE ride_requests SET status = $1 WHERE id = $2 RETURNING *`,
+    [status, id]
+  );
+  return result.rows[0];
+}
+
+/**
+ * Get the active ride request for a driver
+ */
+async function getActiveRideRequestForDriver(driverId) {
+  const result = await pool.query(
+    `SELECT * FROM ride_requests WHERE status = 'accepted' AND driver_id = $1 ORDER BY request_time DESC LIMIT 1`,
+    [driverId]
+  );
+  return result.rows[0];
+}
+
 module.exports = {
-  createRideRequest
+  createRideRequest,
+  getRideRequestById,
+  updateRideRequestStatus,
+  getActiveRideRequestForDriver
 };
