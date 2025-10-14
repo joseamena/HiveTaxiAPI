@@ -3,6 +3,8 @@ const router = express.Router();
 const redisClient = require('../db/redis');
 const rideRequestsDb = require('../db/rideRequests');
 const notificationService = require('../services/notificationService');
+const usersDb = require('../db/users');
+const { findFreshNearbyDrivers } = require('../utils/driverGeo');
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
 
@@ -280,48 +282,11 @@ router.post('/', authenticateJWT, async (req, res) => {
     } = req.body;
 
     console.log("authenticated user:", req.user);
-    
     // Validate input (basic)
     if (!pickup || !pickup.lat || !pickup.lng) {
       return res.status(400).json({ error: 'Pickup location required' });
     }
-    // Find nearby drivers using Redis GEO
-    let nearbyDrivers = [];
-    try {
-      const drivers = await redisClient.sendCommand([
-        'GEORADIUS',
-        'drivers:online',
-        pickup.lng.toString(),
-        pickup.lat.toString(),
-        '5',
-        'km',
-        'WITHDIST',
-        'WITHCOORD',
-        'COUNT',
-        '10',
-        'ASC'
-      ]);
-      nearbyDrivers = drivers.map(([member, distance, [lng, lat]]) => ({
-        driverId: member.replace('driver:', ''),
-        distance: parseFloat(distance),
-        latitude: parseFloat(lat),
-        longitude: parseFloat(lng)
-      }));
-    } catch (err) {
-      console.error('Redis georadius error:', err);
-    }
-    // Filter out stale drivers (those without a valid last-seen key in Redis)
-    const freshDrivers = [];
-    for (const driver of nearbyDrivers) {
-      const lastSeenKey = `driver:last_seen:${driver.driverId}`;
-      const lastSeen = await redisClient.sendCommand(['GET', lastSeenKey]);
-      if (lastSeen) {
-        freshDrivers.push(driver);
-      } else {
-        // Remove stale driver from Redis GEO set
-        await redisClient.sendCommand(['ZREM', 'drivers:online', `driver:${driver.driverId}`]);
-      }
-    }
+
     // Save to database
     const newRequest = await rideRequestsDb.createRideRequest({
       passengerId,
@@ -335,37 +300,59 @@ router.post('/', authenticateJWT, async (req, res) => {
       priority
     });
 
-    console.log("nearbyDrivers", freshDrivers);
-    
-    // Initialize request status in Redis
+    // Initialize request status in Redis so the frontend and other services
+    // can immediately poll for the ride request's status. This allows the app
+    // to show "pending" state right after creation, even while driver matching
+    // and queue creation are still running in the background.
     await redisClient.sendCommand(['SET', `ride:request:${newRequest.id}:status`, 'pending']);
     await redisClient.sendCommand(['EXPIRE', `ride:request:${newRequest.id}:status`, '600']);
-    
-    // Create driver queue and start processing
-    if (freshDrivers.length > 0) {
-      const queueLength = await notificationService.createDriverQueue(newRequest.id, freshDrivers);
-      console.log(`Created driver queue with ${queueLength} drivers for request ${newRequest.id}`);
-      
-      // Start processing the queue (non-blocking)
-      setImmediate(() => {
-        notificationService.processDriverQueue(newRequest.id, {
-          pickup,
-          dropoff,
-          proposedFare,
-          estimatedDistance,
-          estimatedDuration,
-          passengerName,
-          passengerPhone,
-          passengerId,
-          priority
-        });
+
+    // Start driver finding and queue creation in the background
+    setImmediate(() => {
+      findDriversAndCreateQueueForRequest(newRequest, {
+        pickup,
+        dropoff,
+        proposedFare,
+        estimatedDistance,
+        estimatedDuration,
+        passengerName,
+        passengerPhone,
+        passengerId,
+        priority
       });
-    }
-    
+    });
+
+    // Respond immediately with the created ride request
     res.status(201).json({ rideRequest: newRequest });
   } catch (error) {
     res.status(500).json({ error: 'Failed to create ride request', details: error.message });
   }
 });
+
+// Background function to find drivers and create queue for a ride request
+async function findDriversAndCreateQueueForRequest(rideRequest, meta) {
+  try {
+    findFreshNearbyDrivers({
+      lat: meta.pickup.lat,
+      lng: meta.pickup.lng,
+      radius: 5, // km, can be parameterized
+      count: 10
+    }).then(async (freshDrivers) => {
+      if (freshDrivers.length > 0) {
+        const queueLength = await notificationService.createDriverQueue(rideRequest.id, freshDrivers);
+        console.log(`Created driver queue with ${queueLength} drivers for request ${rideRequest.id}`);
+        await notificationService.processDriverQueue(rideRequest.id, meta);
+      } else {
+        // No drivers found, notify the rider
+        console.log(`No available drivers found for request ${rideRequest.id}`);
+        await notificationService.sendNoDriverFoundToRider(meta.passengerId, rideRequest.id);
+      }
+    }).catch((err) => {
+      console.error('Error in findFreshNearbyDrivers:', err);
+    });
+  } catch (err) {
+    console.error('Error in findDriversAndCreateQueueForRequest:', err);
+  }
+}
 
 module.exports = router;
