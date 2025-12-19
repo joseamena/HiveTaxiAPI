@@ -24,8 +24,9 @@ class NotificationService {
       requestId: requestId.toString(),
       type: 'no_drivers_available'
     };
-    return this._sendNotification(userId, title, body, data, 'no_drivers_available');
+    return this._sendNotification(userId, title, body, data);
   }
+
   /**
    * Private helper to send FCM notification to a user by userId
    * @param {string} userId - The user's ID
@@ -34,7 +35,7 @@ class NotificationService {
    * @param {object} data - Additional data to send
    * @param {string} [type='notification'] - Type of notification (for data.type)
    */
-  async _sendNotification(userId, title, body, data = {}, type = 'notification') {
+  async _sendNotification(userId, title, body, data = {}) {
     try {
       let user;
       if (typeof userId === 'number' || (!isNaN(userId) && userId !== '')) {
@@ -52,7 +53,7 @@ class NotificationService {
           title,
           body
         },
-        data: Object.assign({}, data, { type: data.type || type }),
+        data: Object.assign({}, data),
         android: {
           priority: 'high',
           ttl: 60000
@@ -162,9 +163,10 @@ class NotificationService {
       // Update status to no_drivers_available
       await redisClient.sendCommand(['SET', statusKey, 'no_drivers_available']);
       await redisClient.sendCommand(['EXPIRE', statusKey, '600']);
+      
       // Notify rider
       if (rideDetails) {
-        await this.sendRiderNoDriverNotification(requestId, rideDetails);
+        await this.sendNoDriverFoundToRider(rideDetails.passengerId, requestId);
       }
       return;
     }
@@ -223,49 +225,6 @@ class NotificationService {
   }
 
   /**
-   * Send FCM notification to driver
-   */
-  // (removed duplicate sendDriverNotification definition)
-  async sendRiderNoDriverNotification(requestId, rideDetails) {
-    console.log(`Notifying rider ${rideDetails.passengerName} of no available drivers for request ${requestId}`);
-    // Get rider's FCM token
-    const rider = await userDb.getUserById ?
-      await userDb.getUserById(rideDetails.passengerId) :
-      await userDb.getUserByUsername(rideDetails.passengerId);
-    if (!rider || !rider.fcm_token) {
-      console.log(`Rider not found or doesn't have FCM token`);
-      return;
-    }
-    const message = {
-      token: rider.fcm_token,
-      notification: {
-        title: 'No Drivers Available',
-        body: 'Sorry, no drivers are available for your request at this time.'
-      },
-      data: {
-        requestId: requestId.toString(),
-        type: 'no_drivers_available'
-      },
-      android: {
-        priority: 'high',
-        ttl: 60000
-      },
-      apns: {
-        headers: {
-          'apns-priority': '10'
-        },
-        payload: {
-          aps: {
-            sound: 'default'
-          }
-        }
-      }
-    };
-    const response = await admin.messaging().send(message);
-    console.log(`FCM sent to rider ${passengerId} for no drivers:`, response);
-  }
-
-  /**
    * Send FCM notification to driver when ride request expires or is unavailable
    */
   async sendDriverRequestExpiredNotification(driverId, requestId) {
@@ -303,6 +262,41 @@ class NotificationService {
     };
     const response = await admin.messaging().send(message);
     console.log(`FCM sent to driver ${driverId} for expired request:`, response);
+  }
+
+  /**
+   * Notify rider that a driver accepted their ride
+   * @param {string|number} riderId - Rider's user ID or username
+   * @param {string|number} requestId - Ride request ID
+   * @param {string|number} driverId - Driver's user ID or username
+   * @param {number|string|null} estimatedArrival - ETA in minutes (optional)
+   */
+  async sendRideAcceptedToRider(riderId, requestId, driverId, estimatedArrival = null) {
+    try {
+      // Attempt to get driver display information (optional)
+      let driver;
+      if (typeof driverId === 'number' || (!isNaN(driverId) && driverId !== '')) {
+        driver = await userDb.getUserById(Number(driverId));
+      } else {
+        driver = await userDb.getUserByUsername(driverId);
+      }
+
+      const driverName = driver?.display_name || driver?.first_name || driver?.username || 'Your driver';
+      const etaText = estimatedArrival ? ` ETA: ${estimatedArrival} min.` : '';
+
+      const title = 'Ride Accepted';
+      const body = `${driverName} accepted your ride.${etaText}`.trim();
+      const data = {
+        requestId: requestId.toString(),
+        driverId: String(driverId),
+        type: 'ride_accepted',
+        eta: estimatedArrival != null ? String(estimatedArrival) : ''
+      };
+
+      return this._sendNotification(riderId, title, body, data);
+    } catch (err) {
+      console.error(`Error sending ride accepted notification to rider ${riderId}:`, err);
+    }
   }
 
   /**

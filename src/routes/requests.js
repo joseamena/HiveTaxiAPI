@@ -150,6 +150,8 @@ router.post('/:id/accept', authenticateJWT, async (req, res) => {
     await rideRequestsDb.updateRideRequestStatus(id, 'accepted');
     await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'accepted']);
 
+    notificationService.sendRideAcceptedToRider(rideRequest.passenger_id, id, driverId, estimatedArrival);
+
     console.log('Ride request found:', rideRequest);
     // Construct Trip object with camelCase keys
     const trip = {
@@ -332,27 +334,36 @@ router.post('/', authenticateJWT, async (req, res) => {
 // Background function to find drivers and create queue for a ride request
 async function findDriversAndCreateQueueForRequest(rideRequest, meta) {
   try {
+    console.log('[findDriversAndCreateQueueForRequest] Looking for drivers near:', {
+      lat: meta.pickup.lat,
+      lng: meta.pickup.lng,
+      radius: 5,
+      count: 10
+    });
     findFreshNearbyDrivers({
       lat: meta.pickup.lat,
       lng: meta.pickup.lng,
       radius: 5, // km, can be parameterized
       count: 10
     }).then(async (freshDrivers) => {
+      console.log('[findDriversAndCreateQueueForRequest] freshDrivers result:', freshDrivers);
       if (freshDrivers.length > 0) {
         const queueLength = await notificationService.createDriverQueue(rideRequest.id, freshDrivers);
         console.log(`Created driver queue with ${queueLength} drivers for request ${rideRequest.id}`);
         await notificationService.processDriverQueue(rideRequest.id, meta);
       } else {
         // No drivers found, notify the rider
-        console.log(`No available drivers found for request ${rideRequest.id}`);
+        console.log(`[findDriversAndCreateQueueForRequest] No available drivers found for request ${rideRequest.id}`);
         await notificationService.sendNoDriverFoundToRider(meta.passengerId, rideRequest.id);
       }
     }).catch((err) => {
-      console.error('Error in findFreshNearbyDrivers:', err);
+      console.error('[findDriversAndCreateQueueForRequest] Error in findFreshNearbyDrivers:', err);
     });
   } catch (err) {
     console.error('Error in findDriversAndCreateQueueForRequest:', err);
   }
 }
+
+// NOTE: The arrival endpoint has moved to trips.js (POST /api/trips/:id/arrived)
 
 module.exports = router;

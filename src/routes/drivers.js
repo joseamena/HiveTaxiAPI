@@ -1,11 +1,153 @@
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
 const userDb = require('../db/users'); // updated import
+const communitiesDb = require('../db/communities');
 const redisClient = require('../db/redis');
 const authenticateJWT = require('../middleware/auth');
 
+// Helper function to verify user on Hive blockchain
+async function verifyUserOnHiveBlockchain(username, communityTag) {
+  try {
+    const hiveResponse = await axios.post('https://api.hive.blog', {
+      jsonrpc: '2.0',
+      method: 'bridge.list_community_roles',
+      params: { community: communityTag },
+      id: 1
+    });
+
+    if (!hiveResponse.data || !hiveResponse.data.result) {
+      return { verified: false, error: 'No results from blockchain' };
+    }
+
+    const roles = hiveResponse.data.result;
+    const userRole = roles.find(r => r[0] === username);
+    
+    if (!userRole) {
+      return { verified: false, error: 'USER_NOT_IN_COMMUNITY' };
+    }
+
+    // Check if the role is valid (userRole[1] contains the role)
+    const validRoles = ['member', 'mod', 'admin'];
+    if (!validRoles.includes(userRole[1])) {
+      return { verified: false, error: 'INVALID_BLOCKCHAIN_ROLE' };
+    }
+
+    return { verified: true, role: userRole[1] };
+  } catch (error) {
+    console.error('Hive blockchain verification error:', error.message);
+    return { verified: false, error: 'BLOCKCHAIN_REQUEST_FAILED' };
+  }
+}
 
 // Driver management routes
+
+// GET /api/drivers/hive-info - Verify driver authorization and Hive community membership
+router.get('/hive-info', async (req, res) => {
+  try {
+    const { username } = req.query;
+
+    if (!username) {
+      return res.status(400).json({
+        error: 'MISSING_PARAMETER',
+        message: 'Username parameter is required'
+      });
+    }
+
+    // Check if user exists in our backend
+    const user = await userDb.getUserByUsername(username);
+    
+    if (!user) {
+      return res.status(404).json({
+        error: 'USER_NOT_FOUND',
+        message: 'User is not registered as a driver in the backend.'
+      });
+    }
+
+    // Check if user is actually a driver
+    if (user.type !== 'driver') {
+      return res.status(403).json({
+        error: 'USER_NOT_DRIVER',
+        message: 'User is registered but not as a driver.'
+      });
+    }
+
+    // Get all communities for the user
+    const communities = await communitiesDb.listUserCommunities(username);
+    
+    if (!communities || communities.length === 0) {
+      return res.status(403).json({
+        error: 'USER_NOT_MEMBER',
+        message: 'User is not part of the Hive Taxi community.'
+      });
+    }
+
+    // Find a community where the user has the Driver role
+    const driverCommunity = communities.find(c => c.role === 'Driver');
+    
+    if (!driverCommunity) {
+      return res.status(403).json({
+        error: 'INVALID_ROLE',
+        message: "User is a member of the community but does not have the 'Driver' role."
+      });
+    }
+
+    // Get full community details
+    const communityDetails = await communitiesDb.getCommunityByTag(driverCommunity.community);
+
+    // Verify on Hive blockchain
+    const blockchainVerification = await verifyUserOnHiveBlockchain(username, driverCommunity.community);
+
+    if (!blockchainVerification.verified) {
+      // Handle specific blockchain errors
+      if (blockchainVerification.error === 'USER_NOT_IN_COMMUNITY') {
+        return res.status(403).json({
+          error: 'BLOCKCHAIN_NOT_MEMBER',
+          message: 'User is not found in the Hive community on the blockchain.'
+        });
+      }
+      
+      if (blockchainVerification.error === 'INVALID_BLOCKCHAIN_ROLE') {
+        return res.status(403).json({
+          error: 'BLOCKCHAIN_INVALID_ROLE',
+          message: 'User does not have a valid role in the Hive community on the blockchain.'
+        });
+      }
+
+      // For other errors (network issues, etc.), return success with warning
+      console.warn('Blockchain verification failed:', blockchainVerification.error);
+      return res.json({
+        authorized_driver: true,
+        community: {
+          id: driverCommunity.community,
+          name: communityDetails?.name || driverCommunity.community,
+          role: driverCommunity.role,
+          blockchain_verified: false,
+          blockchain_error: 'Unable to verify on Hive blockchain'
+        }
+      });
+    }
+
+    // Return success response with blockchain-verified information
+    return res.json({
+      authorized_driver: true,
+      community: {
+        id: driverCommunity.community,
+        name: communityDetails?.name || driverCommunity.community,
+        role: driverCommunity.role,
+        blockchain_verified: true,
+        blockchain_role: blockchainVerification.role
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in /api/drivers/hive-info:', error);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to verify driver information'
+    });
+  }
+});
 
 // GET /api/drivers/profile - Get driver profile
 router.get('/profile', authenticateJWT, async (req, res) => {
@@ -278,3 +420,55 @@ router.get('/nearby', async (req, res) => {
 });
 
 module.exports = router;
+
+// Driver & community verification route (placed after module.exports originally, move above if needed)
+// GET /api/drivers/verify/:username
+router.get('/verify/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const REQUIRED_COMMUNITY = process.env.REQUIRED_HIVE_COMMUNITY; // e.g. 'hive-xxxxx'
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required', code: 'USERNAME_REQUIRED' });
+    }
+    // Fetch user
+    const user = await userDb.getUserByUsername(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found', code: 'USER_NOT_FOUND' });
+    }
+    // Check driver authorization (type === 'driver')
+    const isDriver = user.type === 'driver';
+    if (!isDriver) {
+      return res.status(401).json({ error: 'User is not an authorized driver', code: 'DRIVER_NOT_AUTHORIZED' });
+    }
+    if (!REQUIRED_COMMUNITY) {
+      return res.status(500).json({ error: 'Required community not configured', code: 'COMMUNITY_ENV_MISSING' });
+    }
+    // Look up role within required community
+    const roleRow = await communitiesDb.getUserCommunityRole(username, REQUIRED_COMMUNITY);
+    if (!roleRow) {
+      return res.status(403).json({
+        error: 'User is not a member of required Hive community',
+        expectedCommunity: REQUIRED_COMMUNITY,
+        code: 'COMMUNITY_MEMBERSHIP_REQUIRED'
+      });
+    }
+    const role = roleRow.role;
+    if (role !== 'Driver') {
+      return res.status(403).json({
+        error: 'User does not have Driver role in community',
+        community: REQUIRED_COMMUNITY,
+        role,
+        code: 'INVALID_COMMUNITY_ROLE'
+      });
+    }
+    return res.json({
+      username,
+      authorized: true,
+      community: REQUIRED_COMMUNITY,
+      role
+    });
+  } catch (err) {
+    console.error('[drivers.verify] Error:', err);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});

@@ -30,6 +30,7 @@ app.use('/api/drivers', require('./routes/drivers'));
 app.use('/api/requests', require('./routes/requests'));
 app.use('/api/trips', require('./routes/trips'));
 app.use('/api/users', require('./routes/users'));
+app.use('/api/communities', require('./routes/communities'));
 
 // 404 handler
 app.use((req, res) => {

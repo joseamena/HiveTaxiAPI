@@ -13,6 +13,7 @@ const redisClient = require('../db/redis');
  * @returns {Promise<Array>} Array of fresh driver objects
  */
 async function findFreshNearbyDrivers({ lat, lng, radius = 5, count = 10 }) {
+  console.log('Finding fresh nearby drivers at:', { lat, lng, radius, count });
   let nearbyDrivers = [];
   try {
     const drivers = await redisClient.sendCommand([

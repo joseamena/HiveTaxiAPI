@@ -5,6 +5,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
 const authenticateJWT = require('../middleware/auth');
 
 const rideRequestsDb = require('../db/rideRequests');
+const redisClient = require('../db/redis');
+const notificationService = require('../services/notificationService');
 
 // Trip management routes
 
@@ -53,8 +55,23 @@ router.post('/:id/start', authenticateJWT, async (req, res) => {
     const { id } = req.params;
     const driverId = req.user.id || req.user.userId || req.user.driverId;
     
-    // Update trip status in database
+    // Update trip status in database and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'in_transit');
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'in_transit']);
+
+    // Fetch ride request to get passengerId and notify rider
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    console.log('[trips.start] Ride request for trip start notification:', rideRequest);
+    if (rideRequest && rideRequest.passenger_id) {
+      // Notify rider that trip has started
+      console.log('[trips.start] Notifying rider that trip has started for request:', id);
+      await notificationService.sendRiderNotification(
+        rideRequest.passenger_id,
+        'Trip started',
+        'Your driver has picked you up and the trip is now in progress.',
+        { requestId: id, type: 'trip_started' }
+      );
+    }
     
     res.json({
       tripId: id,
@@ -64,14 +81,16 @@ router.post('/:id/start', authenticateJWT, async (req, res) => {
       nextAction: 'navigate_to_dropoff'
     });
   } catch (error) {
+    console.error('[trips.start] Error:', error);
     res.status(500).json({ error: 'Failed to start trip' });
   }
 });
 
 // POST /api/trips/:id/complete - Complete a trip
-router.post('/:id/complete', async (req, res) => {
+router.post('/:id/complete', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
     const { 
       finalOdometerReading, 
       actualDistance, 
@@ -79,23 +98,45 @@ router.post('/:id/complete', async (req, res) => {
       tolls = 0,
       notes 
     } = req.body;
-    // Update trip status in database
+    
+    // Update trip status in database and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'completed');
-    // Get ride request from DB to obtain proposedFare
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'completed']);
+    
+    // Get ride request from DB to obtain proposedFare and passenger info
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
     const finalFare = rideRequest ? rideRequest.proposed_fare : null;
+    
+    // Notify rider that trip has been completed
+    if (rideRequest && rideRequest.passenger_id) {
+      console.log('[trips.complete] Notifying rider that trip has been completed for request:', id);
+      await notificationService.sendRiderNotification(
+        rideRequest.passenger_id,
+        'Trip completed',
+        `Your trip has been completed. Total fare: $${finalFare ? finalFare.toFixed(2) : 'N/A'}. Please rate your driver.`,
+        { 
+          requestId: id, 
+          type: 'trip_completed',
+          finalFare,
+          completedAt: new Date().toISOString()
+        }
+      );
+    }
+    
     res.json({
       message: 'Trip completed successfully',
       tripId: id,
       status: 'completed',
       completedAt: new Date().toISOString(),
       finalFare,
-      distance: actualDistance || 3.2,
+      distance: actualDistance || null,
       duration: 12, // minutes
-      earnings: finalFare ? finalFare * 0.8 : null, // 80% to driver
-      notes: notes || null
+      earnings: finalFare || null,
+      notes: notes || null,
+      driverId
     });
   } catch (error) {
+    console.error('[trips.complete] Error:', error);
     res.status(500).json({ error: 'Failed to complete trip' });
   }
 });
@@ -268,20 +309,41 @@ router.get('/:id', (req, res) => {
   }
 });
 
-// POST /api/trips/:id/arrived - Mark arrival at pickup location
-router.post('/:id/arrived', authenticateJWT,(req, res) => {
+// POST /api/trips/:id/arrived - Mark driver arrival at pickup (migrated from requests.js)
+router.post('/:id/arrived', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const { lat, lng } = req.body;
-    
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    // Optionally: const { lat, lng } = req.body; // could be used to verify proximity
 
-    // TODO: Verify location proximity, update trip status
+    // Update status in DB and Redis
+    await rideRequestsDb.updateRideRequestStatus(id, 'arrived_at_pickup');
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'arrived_at_pickup']);
+
+    // Fetch ride request to get passengerId
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    console.log('[trips.arrived] Ride request for arrival notification:', rideRequest);
+    if (rideRequest && rideRequest.passenger_id) {
+      // Notify rider that driver has arrived
+      console.log('[trips.arrived] Notifying rider of driver arrival for request:', id);
+      await notificationService.sendRiderNotification(
+        rideRequest.passenger_id,
+        'Your driver has arrived',
+        'Please meet your driver at the pickup location.',
+        { requestId: id, type: 'driver_arrived' }
+      );
+    }
+
     res.json({
+      message: 'Arrival marked successfully',
+      requestId: id,
       status: 'arrived_at_pickup',
-      timestamp: new Date().toISOString()
+      arrivedAt: new Date().toISOString(),
+      driverId
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to confirm arrival' });
+    console.error('[trips.arrived] Error:', error);
+    res.status(500).json({ error: 'Failed to mark arrival' });
   }
 });
 
