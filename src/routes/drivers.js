@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const userDb = require('../db/users'); // updated import
+const vehiclesDb = require('../db/vehicles');
 const communitiesDb = require('../db/communities');
 const redisClient = require('../db/redis');
 const authenticateJWT = require('../middleware/auth');
@@ -156,10 +157,15 @@ router.get('/profile', authenticateJWT, async (req, res) => {
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
-    // Fetch from database
-    const user = await userDb.getUserByUsername(req.user.hiveUsername);
-    if (!user || user.type !== 'driver') {
+    // Fetch from database by ID
+    const user = await userDb.getUserById(driverId, true);
+    if(!user) {
+      console.warn(`Driver profile not found for ID: ${driverId}`);
       return res.status(404).json({ error: 'Driver not found' });
+    }
+    if (user.type !== 'driver') {
+      console.warn(`User ID: ${driverId} is not a driver`);
+      return res.status(404).json({ error: 'User is not a driver' });
     }
     res.json({
       id: user.id,
@@ -170,7 +176,8 @@ router.get('/profile', authenticateJWT, async (req, res) => {
       status: user.status || 'active',
       rating: user.rating,
       totalTrips: user.completed_trips,
-      vehicle: user.vehicle,
+      vehicles: user.vehicles || [],
+      primaryVehicle: user.primaryVehicle || null,
       location: {
         lat: user.last_lat,
         lng: user.last_long
@@ -189,17 +196,16 @@ router.put('/profile', authenticateJWT, async (req, res) => {
 
     console.log('Profile update request body:', req.body);
 
-    const { displayName, email, phone, licenseNumber, vehicle } = req.body;
+    const { displayName, email, phone, licenseNumber } = req.body;
     // TODO: Validate input
 
     // Update driver in database using driverId
     // We'll assume driverId is the primary key (id) in the drivers table
     // If you use hive_username as the key, adjust accordingly
-    // We'll update first_name, last_name, phone_number, and vehicle fields
+    // Note: Vehicle updates should now go through /api/drivers/vehicles endpoint
     const updates = {};
     if (displayName !== undefined) updates.display_name = displayName;
     if (phone !== undefined) updates.phone_number = phone;
-    if (vehicle !== undefined) updates.vehicle = vehicle;
     if (licenseNumber !== undefined) updates.license_number = licenseNumber;
 
     
@@ -470,5 +476,282 @@ router.get('/verify/:username', async (req, res) => {
   } catch (err) {
     console.error('[drivers.verify] Error:', err);
     res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+// Vehicle management routes
+
+// GET /api/drivers/vehicles - Get all vehicles for the authenticated driver
+router.get('/vehicles', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const vehicles = await vehiclesDb.getVehiclesByUserId(driverId);
+    
+    res.json({
+      message: 'Vehicles retrieved successfully',
+      vehicles: vehicles.map(v => ({
+        id: v.id,
+        make: v.make,
+        model: v.model,
+        year: v.year,
+        color: v.color,
+        plateNumber: v.plate_number,
+        vehicleType: v.vehicle_type,
+        seats: v.seats,
+        isPrimary: v.is_primary,
+        createdAt: v.created_at,
+        updatedAt: v.updated_at
+      })),
+      count: vehicles.length
+    });
+  } catch (error) {
+    console.error('Error fetching vehicles:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch vehicles', 
+      details: error.message 
+    });
+  }
+});
+
+// POST /api/drivers/vehicles - Add a new vehicle
+router.post('/vehicles', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const { make, model, year, color, plateNumber, vehicleType, seats, isPrimary } = req.body;
+
+    // Validation
+    if (!make || !model) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'Make and model are required'
+      });
+    }
+
+    const vehicle = await vehiclesDb.createVehicle({
+      userId: driverId,
+      make,
+      model,
+      year: year || null,
+      color: color || null,
+      plateNumber: plateNumber || null,
+      vehicleType: vehicleType || null,
+      seats: seats || 4,
+      isPrimary: isPrimary || false
+    });
+
+    res.status(201).json({
+      message: 'Vehicle added successfully',
+      vehicle: {
+        id: vehicle.id,
+        make: vehicle.make,
+        model: vehicle.model,
+        year: vehicle.year,
+        color: vehicle.color,
+        plateNumber: vehicle.plate_number,
+        vehicleType: vehicle.vehicle_type,
+        seats: vehicle.seats,
+        isPrimary: vehicle.is_primary,
+        createdAt: vehicle.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Error adding vehicle:', error);
+    
+    // Handle unique constraint violation for plate number
+    if (error.code === '23505' && error.constraint === 'vehicles_plate_number_key') {
+      return res.status(409).json({
+        error: 'DUPLICATE_PLATE',
+        message: 'A vehicle with this plate number already exists'
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to add vehicle', 
+      details: error.message 
+    });
+  }
+});
+
+// GET /api/drivers/vehicles/:id - Get a specific vehicle
+router.get('/vehicles/:id', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const vehicleId = parseInt(req.params.id);
+
+    if (isNaN(vehicleId)) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+
+    const vehicle = await vehiclesDb.getVehicleById(vehicleId);
+
+    if (!vehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
+    }
+
+    // Verify the vehicle belongs to this driver
+    if (vehicle.user_id !== driverId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      vehicle: {
+        id: vehicle.id,
+        make: vehicle.make,
+        model: vehicle.model,
+        year: vehicle.year,
+        color: vehicle.color,
+        plateNumber: vehicle.plate_number,
+        vehicleType: vehicle.vehicle_type,
+        seats: vehicle.seats,
+        isPrimary: vehicle.is_primary,
+        createdAt: vehicle.created_at,
+        updatedAt: vehicle.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching vehicle:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch vehicle', 
+      details: error.message 
+    });
+  }
+});
+
+// PUT /api/drivers/vehicles/:id - Update a vehicle
+router.put('/vehicles/:id', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const vehicleId = parseInt(req.params.id);
+
+    if (isNaN(vehicleId)) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+
+    // Verify the vehicle belongs to this driver
+    const existingVehicle = await vehiclesDb.getVehicleById(vehicleId);
+    if (!existingVehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
+    }
+    if (existingVehicle.user_id !== driverId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { make, model, year, color, plateNumber, vehicleType, seats, isPrimary } = req.body;
+
+    const updates = {};
+    if (make !== undefined) updates.make = make;
+    if (model !== undefined) updates.model = model;
+    if (year !== undefined) updates.year = year;
+    if (color !== undefined) updates.color = color;
+    if (plateNumber !== undefined) updates.plate_number = plateNumber;
+    if (vehicleType !== undefined) updates.vehicle_type = vehicleType;
+    if (seats !== undefined) updates.seats = seats;
+    if (isPrimary !== undefined) updates.is_primary = isPrimary;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const updatedVehicle = await vehiclesDb.updateVehicle(vehicleId, updates);
+
+    res.json({
+      message: 'Vehicle updated successfully',
+      vehicle: {
+        id: updatedVehicle.id,
+        make: updatedVehicle.make,
+        model: updatedVehicle.model,
+        year: updatedVehicle.year,
+        color: updatedVehicle.color,
+        plateNumber: updatedVehicle.plate_number,
+        vehicleType: updatedVehicle.vehicle_type,
+        seats: updatedVehicle.seats,
+        isPrimary: updatedVehicle.is_primary,
+        updatedAt: updatedVehicle.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Error updating vehicle:', error);
+    
+    // Handle unique constraint violation for plate number
+    if (error.code === '23505' && error.constraint === 'vehicles_plate_number_key') {
+      return res.status(409).json({
+        error: 'DUPLICATE_PLATE',
+        message: 'A vehicle with this plate number already exists'
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to update vehicle', 
+      details: error.message 
+    });
+  }
+});
+
+// DELETE /api/drivers/vehicles/:id - Delete a vehicle
+router.delete('/vehicles/:id', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const vehicleId = parseInt(req.params.id);
+
+    if (isNaN(vehicleId)) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+
+    // Verify the vehicle belongs to this driver
+    const existingVehicle = await vehiclesDb.getVehicleById(vehicleId);
+    if (!existingVehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
+    }
+    if (existingVehicle.user_id !== driverId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    await vehiclesDb.deleteVehicle(vehicleId);
+
+    res.json({ message: 'Vehicle deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting vehicle:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete vehicle', 
+      details: error.message 
+    });
+  }
+});
+
+// PUT /api/drivers/vehicles/:id/primary - Set a vehicle as primary
+router.put('/vehicles/:id/primary', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const vehicleId = parseInt(req.params.id);
+
+    if (isNaN(vehicleId)) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+
+    // Verify the vehicle belongs to this driver
+    const existingVehicle = await vehiclesDb.getVehicleById(vehicleId);
+    if (!existingVehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
+    }
+    if (existingVehicle.user_id !== driverId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const updatedVehicle = await vehiclesDb.setPrimaryVehicle(driverId, vehicleId);
+
+    res.json({
+      message: 'Primary vehicle set successfully',
+      vehicle: {
+        id: updatedVehicle.id,
+        make: updatedVehicle.make,
+        model: updatedVehicle.model,
+        isPrimary: updatedVehicle.is_primary
+      }
+    });
+  } catch (error) {
+    console.error('Error setting primary vehicle:', error);
+    res.status(500).json({ 
+      error: 'Failed to set primary vehicle', 
+      details: error.message 
+    });
   }
 });

@@ -313,7 +313,6 @@ async function findOrCreateUser(username, type = 'driver') {
     lastLong: null,
     phoneNumber: null,
     displayName: null,
-    vehicle: type === 'driver' ? null : undefined,
     isOnline: false
   });
   return newUser;

@@ -1,28 +1,40 @@
 // src/db/users.js
 const pool = require('./index');
+const vehiclesDb = require('./vehicles');
 
 /**
  * Create a new user (driver or rider)
  */
-async function createUser({ hiveUsername, type, completedTrips = 0, rating = 0, licenseNumber, lastLat, lastLong, phoneNumber, displayName, vehicle, isOnline }) {
+async function createUser({ hiveUsername, type, completedTrips = 0, rating = 0, licenseNumber, lastLat, lastLong, phoneNumber, displayName, isOnline }) {
   const result = await pool.query(
-    `INSERT INTO users (hive_username, type, completed_trips, rating, license_number, last_lat, last_long, phone_number, display_name, vehicle, is_online)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO users (hive_username, type, completed_trips, rating, license_number, last_lat, last_long, phone_number, display_name, is_online)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [hiveUsername, type, completedTrips, rating, licenseNumber, lastLat, lastLong, phoneNumber, displayName, vehicle, isOnline]
+    [hiveUsername, type, completedTrips, rating, licenseNumber, lastLat, lastLong, phoneNumber, displayName, isOnline]
   );
   return result.rows[0];
 }
 
 /**
- * Get a user by hiveUsername
+ * Get a user by hiveUsername with optional vehicle info
  */
-async function getUserByUsername(hiveUsername) {
+async function getUserByUsername(hiveUsername, includeVehicles = false) {
+  console.log('[getUserByUsername] Looking for username:', hiveUsername, 'Type:', typeof hiveUsername);
   const result = await pool.query(
     `SELECT * FROM users WHERE hive_username = $1`,
     [hiveUsername]
   );
-  return result.rows[0];
+  
+  console.log('[getUserByUsername] Query result rows count:', result.rows.length);
+  const user = result.rows[0];
+  console.log('[getUserByUsername] Found user:', user ? `ID ${user.id}, username ${user.hive_username}` : 'null');
+  
+  if (user && includeVehicles) {
+    user.vehicles = await vehiclesDb.getVehiclesByUserId(user.id);
+    user.primaryVehicle = user.vehicles.find(v => v.is_primary) || user.vehicles[0];
+  }
+  
+  return user;
 }
 
 /**
@@ -30,7 +42,7 @@ async function getUserByUsername(hiveUsername) {
  */
 async function updateUser(hiveUsername, updates) {
   // Only allow certain fields to be updated
-  const fields = ['completed_trips', 'rating', 'license_number', 'last_lat', 'last_long', 'phone_number', 'display_name', 'vehicle', 'is_online', 'type'];
+  const fields = ['completed_trips', 'rating', 'license_number', 'last_lat', 'last_long', 'phone_number', 'display_name', 'is_online', 'type'];
   const setClauses = [];
   const values = [];
   let idx = 1;
@@ -58,7 +70,6 @@ async function updateUserById(id, updates) {
   const fields = [
     'display_name', 
     'phone_number', 
-    'vehicle', 
     'license_number', 
     'is_online', 
     'type',
@@ -95,14 +106,21 @@ async function updateUserById(id, updates) {
 }
 
 /**
- * Get a user by id
+ * Get a user by id with optional vehicle info
  */
-async function getUserById(id) {
+async function getUserById(id, includeVehicles = false) {
   const result = await pool.query(
     `SELECT * FROM users WHERE id = $1`,
     [id]
   );
-  return result.rows[0];
+  const user = result.rows[0];
+  
+  if (user && includeVehicles) {
+    user.vehicles = await vehiclesDb.getVehiclesByUserId(user.id);
+    user.primaryVehicle = user.vehicles.find(v => v.is_primary) || user.vehicles[0];
+  }
+  
+  return user;
 }
 
 /**
