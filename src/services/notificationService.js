@@ -1,14 +1,23 @@
 
 // src/services/notificationService.js
-const admin = require('firebase-admin');
+let admin = null;
 const userDb = require('../db/users');
 const redisClient = require('../db/redis');
 
 // Initialize Firebase Admin (you'll need to add your service account key)
-const serviceAccount = require('../config/firebase-service-account.json');
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+try {
+  const serviceAccount = require('../config/firebase-service-account.json');
+  admin = require('firebase-admin');
+  if (!admin.apps || !admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('✅ Firebase Admin initialized');
+  }
+} catch (err) {
+  console.warn('⚠️  Firebase not configured, push notifications disabled');
+  admin = null;
+}
 
 class NotificationService {
 
@@ -69,6 +78,10 @@ class NotificationService {
           }
         }
       };
+      if (!admin) {
+        console.warn(`⚠️  Firebase not configured, skipping FCM to user ${userId}`);
+        return;
+      }
       const response = await admin.messaging().send(message);
       console.log(`FCM sent to user ${userId}:`, response);
     } catch (err) {
@@ -260,6 +273,10 @@ class NotificationService {
         }
       }
     };
+    if (!admin) {
+      console.warn(`⚠️  Firebase not configured, skipping FCM to driver ${driverId}`);
+      return;
+    }
     const response = await admin.messaging().send(message);
     console.log(`FCM sent to driver ${driverId} for expired request:`, response);
   }
