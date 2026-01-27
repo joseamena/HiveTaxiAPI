@@ -100,6 +100,30 @@ class NotificationService {
   }
 
   /**
+   * Send payment request FCM notification to rider
+   * @param {string|number} riderId - The rider's user ID
+   * @param {object} paymentDetails - Payment request details
+   * @param {string} paymentDetails.hiveAccount - Hive account to receive payment
+   * @param {string} paymentDetails.amount - Payment amount as string
+   * @param {string} paymentDetails.currencyCode - Currency code (e.g., 'HBD', 'HIVE')
+   * @param {string} paymentDetails.invoice - Invoice number/identifier
+   * @param {string} driverName - Name of the driver requesting payment
+   */
+  async sendPaymentRequestToRider(riderId, paymentDetails, driverName) {
+    const { hiveAccount, amount, currencyCode, invoice } = paymentDetails;
+    const title = 'Payment Request';
+    const body = `${driverName} is requesting ${amount} ${currencyCode} for your ride.`;
+    const data = {
+      type: 'payment_request',
+      hiveAccount: hiveAccount.toString(),
+      amount: amount.toString(),
+      currencyCode: currencyCode.toString(),
+      invoice: invoice.toString()
+    };
+    return this._sendNotification(riderId, title, body, data);
+  }
+
+  /**
    * Send FCM notification to driver
    */
   async sendRideRequestToDriver(driverId, requestId, rideDetails) {

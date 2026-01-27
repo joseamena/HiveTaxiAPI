@@ -43,6 +43,52 @@ async function verifyUserOnHiveBlockchain(username, communityTag) {
 
 // Driver management routes
 
+/**
+ * @swagger
+ * /api/drivers/hive-info:
+ *   get:
+ *     summary: Verify driver authorization and Hive community membership
+ *     description: Checks if user is a driver and has valid role in Hive community, with blockchain verification
+ *     tags: [Drivers]
+ *     parameters:
+ *       - in: query
+ *         name: username
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: The Hive username of the driver
+ *     responses:
+ *       200:
+ *         description: Driver verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 authorized_driver:
+ *                   type: boolean
+ *                 community:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     role:
+ *                       type: string
+ *                     blockchain_verified:
+ *                       type: boolean
+ *                     blockchain_role:
+ *                       type: string
+ *       400:
+ *         description: Missing username parameter
+ *       403:
+ *         description: User not driver, not member, or invalid role
+ *       404:
+ *         description: User not found
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/hive-info - Verify driver authorization and Hive community membership
 router.get('/hive-info', async (req, res) => {
   try {
@@ -150,6 +196,58 @@ router.get('/hive-info', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/profile:
+ *   get:
+ *     summary: Get authenticated driver's profile
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Driver profile retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: integer
+ *                 hiveUsername:
+ *                   type: string
+ *                 displayName:
+ *                   type: string
+ *                 phone:
+ *                   type: string
+ *                 licenseNumber:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                 rating:
+ *                   type: number
+ *                 totalTrips:
+ *                   type: integer
+ *                 vehicles:
+ *                   type: array
+ *                 primaryVehicle:
+ *                   type: object
+ *                 location:
+ *                   type: object
+ *                   properties:
+ *                     lat:
+ *                       type: number
+ *                     lng:
+ *                       type: number
+ *                 isOnline:
+ *                   type: boolean
+ *       401:
+ *         description: Authentication required
+ *       404:
+ *         description: Driver not found
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/profile - Get driver profile
 router.get('/profile', authenticateJWT, async (req, res) => {
   try {
@@ -189,6 +287,37 @@ router.get('/profile', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/profile:
+ *   put:
+ *     summary: Update authenticated driver's profile
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               displayName:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               licenseNumber:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Profile updated successfully
+ *       400:
+ *         description: No valid fields to update
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
 // PUT /api/drivers/profile - Update driver profile
 router.put('/profile', authenticateJWT, async (req, res) => {
   try {
@@ -228,6 +357,44 @@ router.put('/profile', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/location:
+ *   post:
+ *     summary: Update driver's current location
+ *     description: Updates driver location in Redis GEO set and sets last seen timestamp
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - latitude
+ *               - longitude
+ *             properties:
+ *               latitude:
+ *                 type: number
+ *               longitude:
+ *                 type: number
+ *               speed:
+ *                 type: number
+ *               timestamp:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       200:
+ *         description: Location updated successfully
+ *       400:
+ *         description: Latitude and longitude are required
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
 // POST /api/drivers/location - Update driver location
 router.post('/location', authenticateJWT, async (req, res) => {
   console.log('POST /api/drivers/location - Request body:', req.body);
@@ -269,6 +436,35 @@ router.post('/location', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/online-status:
+ *   put:
+ *     summary: Set driver online/offline status
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - isOnline
+ *             properties:
+ *               isOnline:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Status updated successfully
+ *       400:
+ *         description: isOnline must be a boolean value
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
 // PUT /api/drivers/online-status - Set driver online/offline in Redis only
 router.put('/online-status', authenticateJWT, async (req, res) => {
   try {
@@ -292,6 +488,42 @@ router.put('/online-status', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/earnings:
+ *   get:
+ *     summary: Get driver earnings
+ *     tags: [Drivers]
+ *     parameters:
+ *       - in: query
+ *         name: period
+ *         schema:
+ *           type: string
+ *           enum: [week, month, year]
+ *         description: Period for earnings calculation
+ *     responses:
+ *       200:
+ *         description: Earnings retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 period:
+ *                   type: string
+ *                 totalEarnings:
+ *                   type: number
+ *                 tripCount:
+ *                   type: integer
+ *                 averagePerTrip:
+ *                   type: number
+ *                 breakdown:
+ *                   type: object
+ *                 dateRange:
+ *                   type: object
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/earnings - Get driver earnings
 router.get('/earnings', (req, res) => {
   try {
@@ -318,6 +550,39 @@ router.get('/earnings', (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/stats:
+ *   get:
+ *     summary: Get driver statistics
+ *     tags: [Drivers]
+ *     responses:
+ *       200:
+ *         description: Statistics retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalTrips:
+ *                   type: integer
+ *                 rating:
+ *                   type: number
+ *                 acceptanceRate:
+ *                   type: integer
+ *                 cancellationRate:
+ *                   type: integer
+ *                 completionRate:
+ *                   type: integer
+ *                 totalDistance:
+ *                   type: number
+ *                 totalDriveTime:
+ *                   type: number
+ *                 thisWeek:
+ *                   type: object
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/stats - Get driver statistics
 router.get('/stats', (req, res) => {
   try {
@@ -341,6 +606,41 @@ router.get('/stats', (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/documents:
+ *   get:
+ *     summary: Get driver documents verification status
+ *     tags: [Drivers]
+ *     responses:
+ *       200:
+ *         description: Documents status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 driverLicense:
+ *                   type: object
+ *                   properties:
+ *                     status:
+ *                       type: string
+ *                       enum: [approved, pending, rejected]
+ *                     expiryDate:
+ *                       type: string
+ *                       format: date
+ *                     uploadedAt:
+ *                       type: string
+ *                       format: date-time
+ *                 vehicleRegistration:
+ *                   type: object
+ *                 insurance:
+ *                   type: object
+ *                 backgroundCheck:
+ *                   type: object
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/documents - Get driver documents status
 router.get('/documents', (req, res) => {
   try {
@@ -371,6 +671,73 @@ router.get('/documents', (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/nearby:
+ *   get:
+ *     summary: Find drivers within a radius
+ *     description: Retrieves nearby online drivers based on geographic coordinates
+ *     tags: [Drivers]
+ *     parameters:
+ *       - in: query
+ *         name: latitude
+ *         schema:
+ *           type: number
+ *         required: true
+ *         description: Search center latitude
+ *       - in: query
+ *         name: longitude
+ *         schema:
+ *           type: number
+ *         required: true
+ *         description: Search center longitude
+ *       - in: query
+ *         name: radius
+ *         schema:
+ *           type: number
+ *           default: 5
+ *         description: Search radius
+ *       - in: query
+ *         name: unit
+ *         schema:
+ *           type: string
+ *           enum: [m, km, mi, ft]
+ *           default: km
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Nearby drivers retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 drivers:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       driverId:
+ *                         type: string
+ *                       distance:
+ *                         type: number
+ *                       latitude:
+ *                         type: number
+ *                       longitude:
+ *                         type: number
+ *                 count:
+ *                   type: integer
+ *                 search:
+ *                   type: object
+ *       400:
+ *         description: Latitude and longitude are required
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/nearby - Find drivers within a radius
 router.get('/nearby', async (req, res) => {
   try {
@@ -427,6 +794,47 @@ router.get('/nearby', async (req, res) => {
 
 module.exports = router;
 
+/**
+ * @swagger
+ * /api/drivers/verify/{username}:
+ *   get:
+ *     summary: Verify driver authorization and community membership
+ *     description: Checks if user is a driver with valid role in required Hive community
+ *     tags: [Drivers]
+ *     parameters:
+ *       - in: path
+ *         name: username
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: The Hive username of the driver
+ *     responses:
+ *       200:
+ *         description: Driver verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 username:
+ *                   type: string
+ *                 authorized:
+ *                   type: boolean
+ *                 community:
+ *                   type: string
+ *                 role:
+ *                   type: string
+ *       400:
+ *         description: Username is required
+ *       401:
+ *         description: User is not an authorized driver
+ *       403:
+ *         description: User not member or invalid role
+ *       404:
+ *         description: User not found
+ *       500:
+ *         description: Internal server error
+ */
 // Driver & community verification route (placed after module.exports originally, move above if needed)
 // GET /api/drivers/verify/:username
 router.get('/verify/:username', async (req, res) => {
@@ -480,6 +888,60 @@ router.get('/verify/:username', async (req, res) => {
 });
 // Vehicle management routes
 
+/**
+ * @swagger
+ * /api/drivers/vehicles:
+ *   get:
+ *     summary: Get all vehicles for authenticated driver
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Vehicles retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 vehicles:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       make:
+ *                         type: string
+ *                       model:
+ *                         type: string
+ *                       year:
+ *                         type: integer
+ *                       color:
+ *                         type: string
+ *                       plateNumber:
+ *                         type: string
+ *                       vehicleType:
+ *                         type: string
+ *                       seats:
+ *                         type: integer
+ *                       isPrimary:
+ *                         type: boolean
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *                       updatedAt:
+ *                         type: string
+ *                         format: date-time
+ *                 count:
+ *                   type: integer
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/vehicles - Get all vehicles for the authenticated driver
 router.get('/vehicles', authenticateJWT, async (req, res) => {
   try {
@@ -512,6 +974,53 @@ router.get('/vehicles', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/vehicles:
+ *   post:
+ *     summary: Add a new vehicle
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - make
+ *               - model
+ *             properties:
+ *               make:
+ *                 type: string
+ *               model:
+ *                 type: string
+ *               year:
+ *                 type: integer
+ *               color:
+ *                 type: string
+ *               plateNumber:
+ *                 type: string
+ *               vehicleType:
+ *                 type: string
+ *               seats:
+ *                 type: integer
+ *                 default: 4
+ *               isPrimary:
+ *                 type: boolean
+ *     responses:
+ *       201:
+ *         description: Vehicle added successfully
+ *       400:
+ *         description: Missing required fields
+ *       401:
+ *         description: Authentication required
+ *       409:
+ *         description: Duplicate plate number
+ *       500:
+ *         description: Internal server error
+ */
 // POST /api/drivers/vehicles - Add a new vehicle
 router.post('/vehicles', authenticateJWT, async (req, res) => {
   try {
@@ -571,6 +1080,67 @@ router.post('/vehicles', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/vehicles/{id}:
+ *   get:
+ *     summary: Get a specific vehicle
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: Vehicle ID
+ *     responses:
+ *       200:
+ *         description: Vehicle retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 vehicle:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                     make:
+ *                       type: string
+ *                     model:
+ *                       type: string
+ *                     year:
+ *                       type: integer
+ *                     color:
+ *                       type: string
+ *                     plateNumber:
+ *                       type: string
+ *                     vehicleType:
+ *                       type: string
+ *                     seats:
+ *                       type: integer
+ *                     isPrimary:
+ *                       type: boolean
+ *                     createdAt:
+ *                       type: string
+ *                       format: date-time
+ *                     updatedAt:
+ *                       type: string
+ *                       format: date-time
+ *       400:
+ *         description: Invalid vehicle ID
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Vehicle not found
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/drivers/vehicles/:id - Get a specific vehicle
 router.get('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
@@ -616,6 +1186,60 @@ router.get('/vehicles/:id', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/vehicles/{id}:
+ *   put:
+ *     summary: Update a vehicle
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: Vehicle ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               make:
+ *                 type: string
+ *               model:
+ *                 type: string
+ *               year:
+ *                 type: integer
+ *               color:
+ *                 type: string
+ *               plateNumber:
+ *                 type: string
+ *               vehicleType:
+ *                 type: string
+ *               seats:
+ *                 type: integer
+ *               isPrimary:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Vehicle updated successfully
+ *       400:
+ *         description: Invalid vehicle ID or no fields to update
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Vehicle not found
+ *       409:
+ *         description: Duplicate plate number
+ *       500:
+ *         description: Internal server error
+ */
 // PUT /api/drivers/vehicles/:id - Update a vehicle
 router.put('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
@@ -686,6 +1310,35 @@ router.put('/vehicles/:id', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/vehicles/{id}:
+ *   delete:
+ *     summary: Delete a vehicle
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: Vehicle ID
+ *     responses:
+ *       200:
+ *         description: Vehicle deleted successfully
+ *       400:
+ *         description: Invalid vehicle ID
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Vehicle not found
+ *       500:
+ *         description: Internal server error
+ */
 // DELETE /api/drivers/vehicles/:id - Delete a vehicle
 router.delete('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
@@ -717,6 +1370,35 @@ router.delete('/vehicles/:id', authenticateJWT, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/drivers/vehicles/{id}/primary:
+ *   put:
+ *     summary: Set a vehicle as primary
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: Vehicle ID
+ *     responses:
+ *       200:
+ *         description: Primary vehicle set successfully
+ *       400:
+ *         description: Invalid vehicle ID
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Vehicle not found
+ *       500:
+ *         description: Internal server error
+ */
 // PUT /api/drivers/vehicles/:id/primary - Set a vehicle as primary
 router.put('/vehicles/:id/primary', authenticateJWT, async (req, res) => {
   try {

@@ -5,6 +5,41 @@ const communitiesDb = require('../db/communities');
 const authenticateJWT = require('../middleware/auth');
 const { authenticateAPIKey, requireScope } = require('../middleware/apiKeyAuth');
 
+/**
+ * @swagger
+ * /api/communities:
+ *   get:
+ *     summary: Get all communities
+ *     description: Retrieves a list of all registered Hive communities
+ *     tags: [Communities]
+ *     responses:
+ *       200:
+ *         description: Communities retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 communities:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       hiveTag:
+ *                         type: string
+ *                       name:
+ *                         type: string
+ *                       latitude:
+ *                         type: number
+ *                       longitude:
+ *                         type: number
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/communities - Get all communities
 router.get('/', async (req, res) => {
   try {
@@ -32,6 +67,48 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/communities/{identifier}:
+ *   get:
+ *     summary: Get a specific community
+ *     description: Retrieves a community by ID or hiveTag
+ *     tags: [Communities]
+ *     parameters:
+ *       - in: path
+ *         name: identifier
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Community ID (integer) or hiveTag (string)
+ *     responses:
+ *       200:
+ *         description: Community retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 community:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                     hiveTag:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     latitude:
+ *                       type: number
+ *                     longitude:
+ *                       type: number
+ *       404:
+ *         description: Community not found
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/communities/:identifier - Get a specific community by ID or hiveTag
 router.get('/:identifier', async (req, res) => {
   try {
@@ -78,6 +155,64 @@ router.get('/:identifier', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/communities/{identifier}/members:
+ *   get:
+ *     summary: Get all members of a community
+ *     description: Retrieves members of a community with optional role filtering
+ *     tags: [Communities]
+ *     parameters:
+ *       - in: path
+ *         name: identifier
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Community ID (integer) or hiveTag (string)
+ *       - in: query
+ *         name: role
+ *         schema:
+ *           type: string
+ *           enum: [Driver, Rider, Admin, Moderator]
+ *         description: Optional role filter
+ *     responses:
+ *       200:
+ *         description: Community members retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 community:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                     hiveTag:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                 members:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       username:
+ *                         type: string
+ *                       role:
+ *                         type: string
+ *                       joinedAt:
+ *                         type: string
+ *                         format: date-time
+ *                 count:
+ *                   type: integer
+ *       404:
+ *         description: Community not found
+ *       500:
+ *         description: Internal server error
+ */
 // GET /api/communities/:identifier/members - Get all members of a community
 router.get('/:identifier/members', async (req, res) => {
   try {
@@ -133,6 +268,66 @@ router.get('/:identifier/members', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/communities/register:
+ *   post:
+ *     summary: Create or update a community
+ *     description: Registers a new Hive community or updates existing one. Requires API key with 'communities:write' scope
+ *     tags: [Communities]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - hiveTag
+ *             properties:
+ *               hiveTag:
+ *                 type: string
+ *                 description: Hive community tag (must start with 'hive-')
+ *               name:
+ *                 type: string
+ *                 description: Community display name
+ *               latitude:
+ *                 type: number
+ *                 description: Community latitude (-90 to 90)
+ *               longitude:
+ *                 type: number
+ *                 description: Community longitude (-180 to 180)
+ *     responses:
+ *       201:
+ *         description: Community created/updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 community:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                     hiveTag:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     latitude:
+ *                       type: number
+ *                     longitude:
+ *                       type: number
+ *       400:
+ *         description: Missing or invalid parameters
+ *       401:
+ *         description: Invalid API key or insufficient scope
+ *       500:
+ *         description: Internal server error
+ */
 // POST /api/communities/register - Create or update a community
 // Requires API key with 'communities:write' scope
 router.post('/register', authenticateAPIKey, requireScope('communities:write'), async (req, res) => {
@@ -194,6 +389,64 @@ router.post('/register', authenticateAPIKey, requireScope('communities:write'), 
   }
 });
 
+/**
+ * @swagger
+ * /api/communities/members:
+ *   post:
+ *     summary: Add a user to a community
+ *     description: Adds a registered user to a community with specified role. Requires API key with 'communities:write' scope
+ *     tags: [Communities]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - username
+ *               - hiveTag
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 description: Hive username of the user
+ *               hiveTag:
+ *                 type: string
+ *                 description: Hive community tag
+ *               role:
+ *                 type: string
+ *                 enum: [Driver, Rider, Admin, Moderator]
+ *                 default: Driver
+ *                 description: User role in the community
+ *     responses:
+ *       201:
+ *         description: User added to community successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 membership:
+ *                   type: object
+ *                   properties:
+ *                     username:
+ *                       type: string
+ *                     community:
+ *                       type: string
+ *                     role:
+ *                       type: string
+ *       400:
+ *         description: Missing required parameters
+ *       401:
+ *         description: Invalid API key or insufficient scope
+ *       404:
+ *         description: User or community not found
+ *       500:
+ *         description: Internal server error
+ */
 // POST /api/communities/members - Add a user to a community
 // Requires API key with 'communities:write' scope
 router.post('/members', authenticateAPIKey, requireScope('communities:write'), async (req, res) => {

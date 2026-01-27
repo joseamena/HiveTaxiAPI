@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
 require('dotenv').config();
 const pool = require('./db');
 
@@ -21,6 +23,19 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString(),
     service: 'Hive Taxi Driver API'
+  });
+});
+
+// Swagger documentation routes
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// Root route - redirect to documentation
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Hive Taxi API',
+    version: '1.0.0',
+    documentation: '/api-docs',
+    health: '/health'
   });
 });
 

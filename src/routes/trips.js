@@ -373,4 +373,197 @@ router.post('/:id/rate', (req, res) => {
   }
 });
 
+// Allowed currency codes for payment requests
+const ALLOWED_CURRENCIES = ['HBD', 'HIVE'];
+
+/**
+ * @swagger
+ * /api/trips/{id}/payment-request:
+ *   post:
+ *     summary: Send payment request to rider via FCM
+ *     description: Allows a driver to send a payment request notification to the rider associated with the trip. The rider will receive an FCM push notification with the payment details.
+ *     tags: [Trips]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The trip/ride request ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - hiveAccount
+ *               - amount
+ *               - currencyCode
+ *               - invoice
+ *             properties:
+ *               hiveAccount:
+ *                 type: string
+ *                 description: Hive account to receive payment
+ *                 example: "someaccount"
+ *               amount:
+ *                 type: string
+ *                 description: Payment amount as a positive numeric string
+ *                 example: "2.04"
+ *               currencyCode:
+ *                 type: string
+ *                 enum: [HBD, HIVE]
+ *                 description: Currency code for the payment
+ *                 example: "HBD"
+ *               invoice:
+ *                 type: string
+ *                 description: Invoice number or identifier
+ *                 example: "some-invoice-number"
+ *     responses:
+ *       200:
+ *         description: Payment request sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Payment request sent successfully"
+ *                 tripId:
+ *                   type: string
+ *                 paymentRequest:
+ *                   type: object
+ *                   properties:
+ *                     hiveAccount:
+ *                       type: string
+ *                     amount:
+ *                       type: string
+ *                     currencyCode:
+ *                       type: string
+ *                     invoice:
+ *                       type: string
+ *                 sentTo:
+ *                   type: object
+ *                   properties:
+ *                     riderId:
+ *                       type: integer
+ *                     riderName:
+ *                       type: string
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: Validation error (missing fields, invalid currency, or invalid amount)
+ *       403:
+ *         description: Driver not authorized for this trip
+ *       404:
+ *         description: Trip not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    
+    if (!driverId) {
+      return res.status(400).json({ error: 'Driver ID not found in token' });
+    }
+
+    const { hiveAccount, amount, currencyCode, invoice } = req.body;
+
+    // Validate required fields
+    if (!hiveAccount || !amount || !currencyCode || !invoice) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'All fields are required: hiveAccount, amount, currencyCode, invoice'
+      });
+    }
+
+    // Validate currency code against allowlist
+    if (!ALLOWED_CURRENCIES.includes(currencyCode)) {
+      return res.status(400).json({
+        error: 'INVALID_CURRENCY',
+        message: `Invalid currency code. Allowed currencies: ${ALLOWED_CURRENCIES.join(', ')}`
+      });
+    }
+
+    // Validate amount is a valid positive numeric string
+    const amountNum = parseFloat(amount);
+    if (isNaN(amountNum) || amountNum <= 0 || !/^\d+(\.\d+)?$/.test(amount)) {
+      return res.status(400).json({
+        error: 'INVALID_AMOUNT',
+        message: 'Amount must be a valid positive numeric string (e.g., "2.04")'
+      });
+    }
+
+    // Fetch the ride request to verify driver ownership and get rider info
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    
+    if (!rideRequest) {
+      return res.status(404).json({
+        error: 'TRIP_NOT_FOUND',
+        message: 'Trip not found'
+      });
+    }
+
+    // Verify the authenticated driver owns this trip
+    if (rideRequest.driver_id !== driverId) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED',
+        message: 'You are not authorized to request payment for this trip'
+      });
+    }
+
+    // Check if rider exists
+    if (!rideRequest.passenger_id) {
+      return res.status(400).json({
+        error: 'NO_RIDER',
+        message: 'No rider associated with this trip'
+      });
+    }
+
+    // Get driver name for notification
+    const userDb = require('../db/users');
+    const driver = await userDb.getUserById(driverId);
+    const driverName = driver?.display_name || driver?.hive_username || 'Your driver';
+
+    // Send payment request notification to rider
+    await notificationService.sendPaymentRequestToRider(
+      rideRequest.passenger_id,
+      { hiveAccount, amount, currencyCode, invoice },
+      driverName
+    );
+
+    console.log(`[trips.payment-request] Payment request sent for trip ${id} to rider ${rideRequest.passenger_id}`);
+
+    res.json({
+      message: 'Payment request sent successfully',
+      tripId: id,
+      paymentRequest: {
+        hiveAccount,
+        amount,
+        currencyCode,
+        invoice
+      },
+      sentTo: {
+        riderId: rideRequest.passenger_id,
+        riderName: rideRequest.passenger_name
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('[trips.payment-request] Error:', error);
+    res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to send payment request',
+      details: error.message
+    });
+  }
+});
+
 module.exports = router;
