@@ -42,6 +42,7 @@ app.get('/', (req, res) => {
 // API Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/drivers', require('./routes/drivers'));
+app.use('/api/riders', require('./routes/riders'));
 app.use('/api/requests', require('./routes/requests'));
 app.use('/api/trips', require('./routes/trips'));
 app.use('/api/users', require('./routes/users'));

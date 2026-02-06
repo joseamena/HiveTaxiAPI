@@ -60,8 +60,18 @@ async function getRideRequestById(id) {
 
 /**
  * Update ride request status by ID
+ * Sets completed_at timestamp when status is 'completed'
  */
 async function updateRideRequestStatus(id, status) {
+  // If completing the ride, also set the completed_at timestamp
+  if (status === 'completed') {
+    const result = await pool.query(
+      `UPDATE ride_requests SET status = $1, completed_at = NOW() WHERE id = $2 RETURNING *`,
+      [status, id]
+    );
+    return result.rows[0];
+  }
+  
   const result = await pool.query(
     `UPDATE ride_requests SET status = $1 WHERE id = $2 RETURNING *`,
     [status, id]
@@ -71,13 +81,15 @@ async function updateRideRequestStatus(id, status) {
 
 /**
  * Get the active ride request for a driver
+ * NOTE: Driver assignments are stored in Redis, not in the ride_requests table.
+ * This function is deprecated - use Redis key `ride:request:${requestId}:driver` instead.
+ * @deprecated
  */
 async function getActiveRideRequestForDriver(driverId) {
-  const result = await pool.query(
-    `SELECT * FROM ride_requests WHERE status = 'accepted' AND driver_id = $1 ORDER BY request_time DESC LIMIT 1`,
-    [driverId]
-  );
-  return result.rows[0];
+  console.warn('[DEPRECATED] getActiveRideRequestForDriver: driver_id is stored in Redis, not PostgreSQL');
+  // This query won't work as driver_id column doesn't exist
+  // Keeping for backwards compatibility but it will return undefined
+  return undefined;
 }
 
 module.exports = {

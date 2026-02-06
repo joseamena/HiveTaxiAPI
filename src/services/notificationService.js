@@ -124,6 +124,40 @@ class NotificationService {
   }
 
   /**
+   * Send FCM notification to driver prompting them to rate the rider
+   * @param {string|number} driverId - The driver's user ID
+   * @param {string|number} requestId - The ride request ID
+   * @param {string} riderName - Name of the rider to rate
+   */
+  async sendDriverRatingPrompt(driverId, requestId, riderName) {
+    const title = 'Rate Your Rider';
+    const body = `How was your trip with ${riderName}? Tap to leave a rating.`;
+    const data = {
+      type: 'rate_rider_prompt',
+      requestId: requestId.toString(),
+      riderName: riderName.toString()
+    };
+    return this._sendNotification(driverId, title, body, data);
+  }
+
+  /**
+   * Send FCM notification to rider prompting them to rate the driver
+   * @param {string|number} riderId - The rider's user ID  
+   * @param {string|number} requestId - The ride request ID
+   * @param {string} driverName - Name of the driver to rate
+   */
+  async sendRiderRatingPrompt(riderId, requestId, driverName) {
+    const title = 'Rate Your Driver';
+    const body = `How was your trip with ${driverName}? Tap to leave a rating.`;
+    const data = {
+      type: 'rate_driver_prompt',
+      requestId: requestId.toString(),
+      driverName: driverName.toString()
+    };
+    return this._sendNotification(riderId, title, body, data);
+  }
+
+  /**
    * Send FCM notification to driver
    */
   async sendRideRequestToDriver(driverId, requestId, rideDetails) {

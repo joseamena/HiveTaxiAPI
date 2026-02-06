@@ -5,6 +5,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
 const authenticateJWT = require('../middleware/auth');
 
 const rideRequestsDb = require('../db/rideRequests');
+const ratingsDb = require('../db/ratings');
 const redisClient = require('../db/redis');
 const notificationService = require('../services/notificationService');
 
@@ -107,7 +108,7 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
     const finalFare = rideRequest ? rideRequest.proposed_fare : null;
     
-    // Notify rider that trip has been completed
+    // Notify rider that trip has been completed and prompt for rating
     if (rideRequest && rideRequest.passenger_id) {
       console.log('[trips.complete] Notifying rider that trip has been completed for request:', id);
       await notificationService.sendRiderNotification(
@@ -115,11 +116,21 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
         'Trip completed',
         `Your trip has been completed. Total fare: $${finalFare ? finalFare.toFixed(2) : 'N/A'}. Please rate your driver.`,
         { 
-          requestId: id, 
+          requestId: String(id), 
           type: 'trip_completed',
-          finalFare,
+          finalFare: finalFare != null ? String(finalFare) : '',
           completedAt: new Date().toISOString()
         }
+      );
+    }
+    
+    // Notify driver to rate the rider
+    if (rideRequest && rideRequest.driver_id) {
+      console.log('[trips.complete] Notifying driver to rate rider for request:', id);
+      await notificationService.sendDriverRatingPrompt(
+        rideRequest.driver_id,
+        id,
+        rideRequest.passenger_name || 'Rider'
       );
     }
     
@@ -347,29 +358,247 @@ router.post('/:id/arrived', authenticateJWT, async (req, res) => {
   }
 });
 
-// POST /api/trips/:id/rate - Rate passenger after trip completion
-router.post('/:id/rate', (req, res) => {
+/**
+ * @swagger
+ * /api/trips/{id}/rate:
+ *   post:
+ *     summary: Submit a rating for a completed trip
+ *     description: Allows a rider to rate their driver or a driver to rate their rider after trip completion. Ratings are bidirectional and each party can only rate once per trip.
+ *     tags: [Trips]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The trip/ride request ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - rating
+ *             properties:
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 description: Rating score from 1 (poor) to 5 (excellent)
+ *                 example: 5
+ *               comment:
+ *                 type: string
+ *                 description: Optional review comment
+ *                 example: "Great experience, very professional!"
+ *     responses:
+ *       200:
+ *         description: Rating submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Rating submitted successfully"
+ *                 rating:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                     score:
+ *                       type: integer
+ *                     comment:
+ *                       type: string
+ *                     ratingType:
+ *                       type: string
+ *                       enum: [rider_to_driver, driver_to_rider]
+ *                     createdAt:
+ *                       type: string
+ *                       format: date-time
+ *       400:
+ *         description: Invalid request (rating out of range, already rated, or trip not completed)
+ *       404:
+ *         description: Trip not found
+ *       410:
+ *         description: Rating window has expired (48 hours after trip completion)
+ */
+router.post('/:id/rate', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const { rating, comment } = req.body;
+    const userId = req.user.id || req.user.userId;
     
+    // Validate rating
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({
-        error: 'Rating must be between 1 and 5'
+        error: 'INVALID_RATING',
+        message: 'Rating must be between 1 and 5'
       });
     }
 
-    // TODO: Save rating in database
+    // Get the ride request
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    if (!rideRequest) {
+      return res.status(404).json({
+        error: 'TRIP_NOT_FOUND',
+        message: 'Trip not found'
+      });
+    }
+
+    // Verify trip is completed
+    if (rideRequest.status !== 'completed') {
+      return res.status(400).json({
+        error: 'TRIP_NOT_COMPLETED',
+        message: 'Can only rate completed trips'
+      });
+    }
+
+    // Check if rating window has expired (48 hours)
+    const isExpired = await ratingsDb.isRatingWindowExpired(id);
+    if (isExpired) {
+      return res.status(410).json({
+        error: 'RATING_WINDOW_EXPIRED',
+        message: 'Rating window has expired (48 hours after trip completion)'
+      });
+    }
+
+    // Determine rating type and parties
+    let ratingType, raterId, ratedId;
+    
+    if (userId === rideRequest.passenger_id) {
+      // Rider is rating the driver
+      ratingType = 'rider_to_driver';
+      raterId = rideRequest.passenger_id;
+      ratedId = rideRequest.driver_id;
+    } else if (userId === rideRequest.driver_id) {
+      // Driver is rating the rider
+      ratingType = 'driver_to_rider';
+      raterId = rideRequest.driver_id;
+      ratedId = rideRequest.passenger_id;
+    } else {
+      return res.status(403).json({
+        error: 'NOT_AUTHORIZED',
+        message: 'You are not authorized to rate this trip'
+      });
+    }
+
+    // Check if already rated
+    const alreadyRated = await ratingsDb.ratingExists(id, ratingType);
+    if (alreadyRated) {
+      return res.status(400).json({
+        error: 'ALREADY_RATED',
+        message: 'You have already rated this trip'
+      });
+    }
+
+    // Create the rating
+    const newRating = await ratingsDb.createRating({
+      rideRequestId: parseInt(id, 10),
+      raterId,
+      ratedId,
+      ratingType,
+      score: rating,
+      comment: comment || null
+    });
+
+    console.log(`[trips.rate] ${ratingType} rating created for trip ${id}: ${rating} stars`);
+
     res.json({
-      message: 'Passenger rated successfully',
-      tripId: id,
+      message: 'Rating submitted successfully',
       rating: {
-        score: rating,
-        comment: comment || null
+        id: newRating.id,
+        score: newRating.score,
+        comment: newRating.comment,
+        ratingType: newRating.rating_type,
+        createdAt: newRating.created_at
       }
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to rate passenger' });
+    console.error('[trips.rate] Error:', error);
+    res.status(500).json({ error: 'Failed to submit rating' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/trips/{id}/ratings:
+ *   get:
+ *     summary: Get all ratings for a specific trip
+ *     description: Returns both rider-to-driver and driver-to-rider ratings for a completed trip.
+ *     tags: [Trips]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The trip/ride request ID
+ *     responses:
+ *       200:
+ *         description: Ratings for the trip
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tripId:
+ *                   type: string
+ *                 ratings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       ratingType:
+ *                         type: string
+ *                       score:
+ *                         type: integer
+ *                       comment:
+ *                         type: string
+ *                       raterName:
+ *                         type: string
+ *                       createdAt:
+ *                         type: string
+ *       404:
+ *         description: Trip not found
+ */
+router.get('/:id/ratings', authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verify trip exists
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    if (!rideRequest) {
+      return res.status(404).json({
+        error: 'TRIP_NOT_FOUND',
+        message: 'Trip not found'
+      });
+    }
+
+    const ratings = await ratingsDb.getRatingsForRide(id);
+    
+    res.json({
+      tripId: id,
+      ratings: ratings.map(r => ({
+        id: r.id,
+        ratingType: r.rating_type,
+        score: r.score,
+        comment: r.comment,
+        raterName: r.rater_name,
+        raterUsername: r.rater_username,
+        createdAt: r.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('[trips.getRatings] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch ratings' });
   }
 });
 
@@ -469,6 +698,12 @@ router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
     const { id } = req.params;
     const driverId = req.user.id || req.user.userId || req.user.driverId;
     
+    console.log(`[trips.payment-request] Request for trip ${id} from token user:`, {
+      driverId,
+      tokenFields: { id: req.user.id, userId: req.user.userId, driverId: req.user.driverId },
+      hiveUsername: req.user.hive_username || req.user.hiveUsername
+    });
+
     if (!driverId) {
       return res.status(400).json({ error: 'Driver ID not found in token' });
     }
@@ -510,8 +745,26 @@ router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
       });
     }
 
+    console.log(`[trips.payment-request] Trip ${id} data:`, {
+      tripStatus: rideRequest.status,
+      passengerId: rideRequest.passenger_id
+    });
+
+    // Get the assigned driver from Redis (driver_id is stored there when ride is accepted)
+    const redisClient = require('../db/redis');
+    const assignedDriverId = await redisClient.sendCommand(['GET', `ride:request:${id}:driver`]);
+    
+    console.log(`[trips.payment-request] Trip ${id} assigned driver from Redis:`, {
+      assignedDriverId,
+      assignedDriverIdType: typeof assignedDriverId,
+      requestingDriverId: driverId,
+      requestingDriverIdType: typeof driverId
+    });
+
     // Verify the authenticated driver owns this trip
-    if (rideRequest.driver_id !== driverId) {
+    // Compare as strings since Redis stores strings
+    if (!assignedDriverId || String(assignedDriverId) !== String(driverId)) {
+      console.warn(`[trips.payment-request] 403 UNAUTHORIZED: Trip ${id} assignedDriverId=${assignedDriverId} !== requesting driverId=${driverId}`);
       return res.status(403).json({
         error: 'UNAUTHORIZED',
         message: 'You are not authorized to request payment for this trip'

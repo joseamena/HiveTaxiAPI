@@ -4,6 +4,7 @@ const axios = require('axios');
 const userDb = require('../db/users'); // updated import
 const vehiclesDb = require('../db/vehicles');
 const communitiesDb = require('../db/communities');
+const ratingsDb = require('../db/ratings');
 const redisClient = require('../db/redis');
 const authenticateJWT = require('../middleware/auth');
 
@@ -792,8 +793,6 @@ router.get('/nearby', async (req, res) => {
   }
 });
 
-module.exports = router;
-
 /**
  * @swagger
  * /api/drivers/verify/{username}:
@@ -1437,3 +1436,102 @@ router.put('/vehicles/:id/primary', authenticateJWT, async (req, res) => {
     });
   }
 });
+
+/**
+ * @swagger
+ * /api/drivers/pending-reviews:
+ *   get:
+ *     summary: Get pending reviews for the authenticated driver
+ *     description: Returns completed rides where the driver hasn't submitted a rating yet (within 48-hour window)
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Maximum number of results to return
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Number of results to skip for pagination
+ *     responses:
+ *       200:
+ *         description: List of pending reviews
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pendingReviews:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       rideRequestId:
+ *                         type: integer
+ *                       rider:
+ *                         type: object
+ *                         properties:
+ *                           id:
+ *                             type: integer
+ *                           name:
+ *                             type: string
+ *                           hiveUsername:
+ *                             type: string
+ *                           profileImage:
+ *                             type: string
+ *                       trip:
+ *                         type: object
+ *                         properties:
+ *                           pickupAddress:
+ *                             type: string
+ *                           dropoffAddress:
+ *                             type: string
+ *                           completedAt:
+ *                             type: string
+ *                             format: date-time
+ *                           fare:
+ *                             type: number
+ *                       reviewWindow:
+ *                         type: object
+ *                         properties:
+ *                           hoursSinceCompletion:
+ *                             type: string
+ *                           hoursRemaining:
+ *                             type: string
+ *                 total:
+ *                   type: integer
+ *                 limit:
+ *                   type: integer
+ *                 offset:
+ *                   type: integer
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+// GET /api/drivers/pending-reviews - Get pending reviews for driver
+router.get('/pending-reviews', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+
+    const result = await ratingsDb.getPendingReviewsForDriver(driverId, { limit, offset });
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching pending reviews:', error);
+    res.status(500).json({
+      error: 'Failed to fetch pending reviews',
+      details: error.message
+    });
+  }
+});
+
+module.exports = router;
