@@ -132,6 +132,44 @@ async function deleteUser(hiveUsername) {
 }
 
 /**
+ * Update a driver's check-in permlink
+ * @param {number} driverId - The driver's user ID
+ * @param {string} permlink - The Hive blockchain permlink for the check-in post
+ * @returns {Promise<Object>} The updated user record
+ */
+async function updateDriverCheckin(driverId, permlink) {
+  const result = await pool.query(
+    `UPDATE users 
+     SET last_checkin_permlink = $1, last_checkin_at = NOW() 
+     WHERE id = $2 AND type = 'driver'
+     RETURNING *`,
+    [permlink, driverId]
+  );
+  return result.rows[0];
+}
+
+/**
+ * Get a driver's current check-in permlink
+ * @param {number} driverId - The driver's user ID
+ * @returns {Promise<Object|null>} Object with permlink and timestamp, or null
+ */
+async function getDriverCheckin(driverId) {
+  const result = await pool.query(
+    `SELECT last_checkin_permlink, last_checkin_at 
+     FROM users 
+     WHERE id = $1 AND type = 'driver'`,
+    [driverId]
+  );
+  if (!result.rows[0] || !result.rows[0].last_checkin_permlink) {
+    return null;
+  }
+  return {
+    permlink: result.rows[0].last_checkin_permlink,
+    checkinAt: result.rows[0].last_checkin_at
+  };
+}
+
+/**
  * List all users, optionally filtered by type
  */
 async function listUsers(type) {
@@ -151,5 +189,7 @@ module.exports = {
   updateUser,
   updateUserById,
   deleteUser,
-  listUsers
+  listUsers,
+  updateDriverCheckin,
+  getDriverCheckin
 };

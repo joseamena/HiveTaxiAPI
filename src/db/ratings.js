@@ -11,20 +11,155 @@ const pool = require('./index');
  * @param {number} params.score - Rating score from 1-5
  * @param {string} [params.comment] - Optional comment/review
  * @param {string} [params.permlink] - Optional Hive blockchain permlink for the review
+ * @param {string} [params.parentPermlink] - Optional Hive blockchain permlink of the parent post being replied to
+ * @param {string} [params.status] - Rating status: 'pending', 'awaiting_response', or 'completed'
  * @returns {Promise<Object>} The created rating
  */
-async function createRating({ rideRequestId, raterId, ratedId, ratingType, score, comment, permlink }) {
+async function createRating({ rideRequestId, raterId, ratedId, ratingType, score, comment, permlink, parentPermlink, status = 'completed' }) {
   const result = await pool.query(
-    `INSERT INTO ratings (ride_request_id, rater_id, rated_id, rating_type, score, comment, permlink)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO ratings (ride_request_id, rater_id, rated_id, rating_type, score, comment, permlink, parent_permlink, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [rideRequestId, raterId, ratedId, ratingType, score, comment || null, permlink || null]
+    [rideRequestId, raterId, ratedId, ratingType, score || null, comment || null, permlink || null, parentPermlink || null, status]
   );
   
-  // Update the rated user's aggregate rating
-  await updateUserAggregateRating(ratedId);
+  // Only update aggregate rating if score is provided (not pending)
+  if (score) {
+    await updateUserAggregateRating(ratedId);
+  }
   
   return result.rows[0];
+}
+
+/**
+ * Create a pending rating entry (no score yet, awaiting blockchain submission)
+ * @param {Object} params - Pending rating parameters
+ * @param {number} params.rideRequestId - The ride request ID
+ * @param {number} params.raterId - The user ID of the person who will give the rating
+ * @param {number} params.ratedId - The user ID of the person who will be rated
+ * @param {string} params.ratingType - Either 'rider_to_driver' or 'driver_to_rider'
+ * @param {string} params.parentPermlink - The Hive permlink the rater should reply to
+ * @returns {Promise<Object>} The created pending rating
+ */
+async function createPendingRating({ rideRequestId, raterId, ratedId, ratingType, parentPermlink }) {
+  const result = await pool.query(
+    `INSERT INTO ratings (ride_request_id, rater_id, rated_id, rating_type, parent_permlink, status)
+     VALUES ($1, $2, $3, $4, $5, 'pending')
+     RETURNING *`,
+    [rideRequestId, raterId, ratedId, ratingType, parentPermlink]
+  );
+  return result.rows[0];
+}
+
+/**
+ * Update a pending rating with the submitted review details
+ * @param {number} ratingId - The rating ID
+ * @param {Object} params - Update parameters
+ * @param {number} params.score - Rating score from 1-5
+ * @param {string} [params.comment] - Optional comment/review
+ * @param {string} params.permlink - The Hive permlink of the submitted review
+ * @param {string} [params.status] - New status (default: 'awaiting_response')
+ * @returns {Promise<Object>} The updated rating
+ */
+async function updateRatingWithReply({ ratingId, score, comment, permlink, status = 'awaiting_response' }) {
+  const result = await pool.query(
+    `UPDATE ratings 
+     SET score = $1, comment = $2, permlink = $3, status = $4
+     WHERE id = $5
+     RETURNING *`,
+    [score, comment || null, permlink, status, ratingId]
+  );
+  
+  // Update the rated user's aggregate rating now that score is set
+  if (result.rows[0] && score) {
+    await updateUserAggregateRating(result.rows[0].rated_id);
+  }
+  
+  return result.rows[0];
+}
+
+/**
+ * Get pending ratings for a user (ratings they need to submit)
+ * @param {number} userId - The user ID
+ * @param {string} [ratingType] - Filter by rating type ('rider_to_driver' or 'driver_to_rider')
+ * @returns {Promise<Array>} Array of pending ratings
+ */
+async function getPendingRatingsForUser(userId, ratingType = null) {
+  let query = `
+    SELECT r.*, 
+           rq.pickup_address, rq.dropoff_address, rq.completed_at, rq.proposed_fare,
+           rated.display_name as rated_name, rated.hive_username as rated_username
+    FROM ratings r
+    JOIN ride_requests rq ON r.ride_request_id = rq.id
+    JOIN users rated ON r.rated_id = rated.id
+    WHERE r.rater_id = $1 AND r.status = 'pending'
+  `;
+  const params = [userId];
+  
+  if (ratingType) {
+    query += ` AND r.rating_type = $2`;
+    params.push(ratingType);
+  }
+  
+  query += ` ORDER BY r.created_at DESC`;
+  
+  const result = await pool.query(query, params);
+  return result.rows;
+}
+
+/**
+ * Get a pending rating by ride request ID and rating type
+ * @param {number} rideRequestId - The ride request ID
+ * @param {string} ratingType - Either 'rider_to_driver' or 'driver_to_rider'
+ * @returns {Promise<Object|null>} The pending rating or null
+ */
+async function getPendingRatingByRideAndType(rideRequestId, ratingType) {
+  const result = await pool.query(
+    `SELECT * FROM ratings 
+     WHERE ride_request_id = $1 AND rating_type = $2 AND status = 'pending'`,
+    [rideRequestId, ratingType]
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * Update rating status
+ * @param {number} ratingId - The rating ID
+ * @param {string} status - New status
+ * @returns {Promise<Object>} The updated rating
+ */
+async function updateRatingStatus(ratingId, status) {
+  const result = await pool.query(
+    `UPDATE ratings SET status = $1 WHERE id = $2 RETURNING *`,
+    [status, ratingId]
+  );
+  return result.rows[0];
+}
+
+/**
+ * Delete a completed rating (since it now lives on the blockchain)
+ * @param {number} ratingId - The rating ID to delete
+ * @returns {Promise<Object|null>} The deleted rating or null
+ */
+async function deleteRating(ratingId) {
+  const result = await pool.query(
+    `DELETE FROM ratings WHERE id = $1 RETURNING *`,
+    [ratingId]
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * Delete ratings by ride request ID (for cleanup after blockchain completion)
+ * @param {number} rideRequestId - The ride request ID
+ * @returns {Promise<number>} Number of deleted ratings
+ */
+async function deleteRatingsByRide(rideRequestId) {
+  const result = await pool.query(
+    `DELETE FROM ratings WHERE ride_request_id = $1`,
+    [rideRequestId]
+  );
+  return result.rowCount;
 }
 
 /**
@@ -265,7 +400,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
   const countResult = await pool.query(
     `SELECT COUNT(*) as total
      FROM ride_requests rq
-     WHERE rq.passenger_id = $1
+     WHERE rq.passenger_id = $1::text
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
        AND NOT EXISTS (
@@ -288,13 +423,12 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
        rq.estimated_duration,
        u.display_name as driver_display_name,
        u.hive_username as driver_hive_username,
-       u.profile_image_url as driver_profile_image,
        u.rating as driver_rating,
        EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_since_completion,
        48 - EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_remaining
      FROM ride_requests rq
      JOIN users u ON rq.driver_id = u.id
-     WHERE rq.passenger_id = $1
+     WHERE rq.passenger_id = $1::text
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
        AND NOT EXISTS (
@@ -314,8 +448,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
         id: row.driver_id,
         username: row.driver_hive_username,
         displayName: row.driver_display_name,
-        rating: parseFloat(row.driver_rating) || 0,
-        profileImage: row.driver_profile_image
+        rating: parseFloat(row.driver_rating) || 0
       },
       tripSummary: {
         pickup: row.pickup_address,
@@ -373,11 +506,10 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
        rq.proposed_fare,
        u.display_name as rider_display_name,
        u.hive_username as rider_hive_username,
-       u.profile_image_url as rider_profile_image,
        EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_since_completion,
        48 - EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_remaining
      FROM ride_requests rq
-     JOIN users u ON rq.passenger_id = u.id
+     JOIN users u ON rq.passenger_id::integer = u.id
      WHERE rq.driver_id = $1
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
@@ -397,8 +529,7 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
       rider: {
         id: row.passenger_id,
         name: row.rider_display_name || row.passenger_name,
-        hiveUsername: row.rider_hive_username,
-        profileImage: row.rider_profile_image
+        hiveUsername: row.rider_hive_username
       },
       trip: {
         pickupAddress: row.pickup_address,
@@ -419,6 +550,13 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
 
 module.exports = {
   createRating,
+  createPendingRating,
+  updateRatingWithReply,
+  getPendingRatingsForUser,
+  getPendingRatingByRideAndType,
+  updateRatingStatus,
+  deleteRating,
+  deleteRatingsByRide,
   getRatingByRideAndType,
   getRatingsForRide,
   getRatingsReceivedByUser,

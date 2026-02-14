@@ -148,6 +148,7 @@ router.post('/:id/accept', authenticateJWT, async (req, res) => {
     }
     // Update status in database and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'accepted');
+    await rideRequestsDb.assignDriverToRideRequest(id, driverId);
     await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'accepted']);
 
     notificationService.sendRideAcceptedToRider(rideRequest.passenger_id, id, driverId, estimatedArrival);

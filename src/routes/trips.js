@@ -6,6 +6,7 @@ const authenticateJWT = require('../middleware/auth');
 
 const rideRequestsDb = require('../db/rideRequests');
 const ratingsDb = require('../db/ratings');
+const userDb = require('../db/users');
 const redisClient = require('../db/redis');
 const notificationService = require('../services/notificationService');
 
@@ -108,23 +109,55 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
     const finalFare = rideRequest ? rideRequest.proposed_fare : null;
     
-    // Notify rider that trip has been completed and prompt for rating
+    // Get driver's check-in permlink for the review chain
+    let driverCheckin = null;
+    if (rideRequest && rideRequest.driver_id) {
+      driverCheckin = await userDb.getDriverCheckin(rideRequest.driver_id);
+    }
+    
+    // Create pending rating for rider to submit their review
+    // The rider will reply to the driver's check-in post on Hive blockchain
+    if (rideRequest && rideRequest.passenger_id && driverCheckin && driverCheckin.permlink) {
+      try {
+        await ratingsDb.createPendingRating({
+          rideRequestId: parseInt(id),
+          raterId: rideRequest.passenger_id,      // Rider will give the rating
+          ratedId: rideRequest.driver_id,          // Driver will be rated
+          ratingType: 'rider_to_driver',
+          parentPermlink: driverCheckin.permlink   // Rider replies to driver's check-in post
+        });
+        console.log('[trips.complete] Created pending rating for rider to review driver');
+      } catch (ratingError) {
+        // Log but don't fail trip completion if rating creation fails
+        console.error('[trips.complete] Failed to create pending rating:', ratingError.message);
+      }
+    }
+    
+    // Notify rider that trip has been completed with the check-in permlink for their review
     if (rideRequest && rideRequest.passenger_id) {
       console.log('[trips.complete] Notifying rider that trip has been completed for request:', id);
+      
+      // Get driver info for the notification
+      const driver = await userDb.getUserById(rideRequest.driver_id);
+      const driverUsername = driver ? driver.hive_username : '';
+      
       await notificationService.sendRiderNotification(
         rideRequest.passenger_id,
-        'Trip completed',
-        `Your trip has been completed. Total fare: $${finalFare ? finalFare.toFixed(2) : 'N/A'}. Please rate your driver.`,
+        'Trip completed - Leave a review!',
+        `Your trip has been completed. Total fare: $${finalFare ? finalFare.toFixed(2) : 'N/A'}. Reply to the driver's check-in post on Hive to leave your review.`,
         { 
           requestId: String(id), 
           type: 'trip_completed',
           finalFare: finalFare != null ? String(finalFare) : '',
-          completedAt: new Date().toISOString()
+          completedAt: new Date().toISOString(),
+          // Include check-in permlink so rider knows where to reply
+          parentPermlink: driverCheckin ? driverCheckin.permlink : '',
+          driverUsername: driverUsername
         }
       );
     }
     
-    // Notify driver to rate the rider
+    // Notify driver to rate the rider (they will do this after rider submits their review)
     if (rideRequest && rideRequest.driver_id) {
       console.log('[trips.complete] Notifying driver to rate rider for request:', id);
       await notificationService.sendDriverRatingPrompt(
@@ -144,7 +177,9 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
       duration: 12, // minutes
       earnings: finalFare || null,
       notes: notes || null,
-      driverId
+      driverId,
+      // Include check-in info for client
+      reviewParentPermlink: driverCheckin ? driverCheckin.permlink : null
     });
   } catch (error) {
     console.error('[trips.complete] Error:', error);

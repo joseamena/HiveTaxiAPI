@@ -6,6 +6,7 @@ const rideRequestsDb = require('../db/rideRequests');
 const userDb = require('../db/users');
 const authenticateJWT = require('../middleware/auth');
 const { verifyReviewPermlink } = require('../utils/hiveValidation');
+const notificationService = require('../services/notificationService');
 
 /**
  * @swagger
@@ -258,14 +259,17 @@ router.post('/pending-reviews/:tripId/complete', authenticateJWT, async (req, re
       });
     }
 
+    // Check if there's a pending rating entry for this trip (created on trip completion)
+    const pendingRating = await ratingsDb.getPendingRatingByRideAndType(tripId, 'rider_to_driver');
+    
     // Validate the permlink on the blockchain
-    // The review should be a reply to the driver's content
+    // The review should be a reply to the driver's check-in post
+    const expectedParentPermlink = pendingRating ? pendingRating.parent_permlink : null;
     const validation = await verifyReviewPermlink(
       riderUsername,
       permlink,
-      driver.hive_username
-      // Note: We're not requiring a specific parent permlink for MVP
-      // In the future, we could validate against driver's check-in post permlink
+      driver.hive_username,
+      expectedParentPermlink  // Validate against driver's check-in permlink
     );
 
     if (!validation.verified) {
@@ -275,16 +279,71 @@ router.post('/pending-reviews/:tripId/complete', authenticateJWT, async (req, re
       });
     }
 
-    // Create the rating with permlink
-    const newRating = await ratingsDb.createRating({
-      rideRequestId: tripId,
-      raterId: riderId,
-      ratedId: trip.driver_id,
-      ratingType: 'rider_to_driver',
-      score: rating,
-      comment: comment || null,
-      permlink: permlink
-    });
+    let newRating;
+    
+    if (pendingRating) {
+      // Update the existing pending rating with the submitted review
+      newRating = await ratingsDb.updateRatingWithReply({
+        ratingId: pendingRating.id,
+        score: rating,
+        comment: comment || null,
+        permlink: permlink,
+        status: 'awaiting_response'  // Awaiting driver's counter-review
+      });
+      console.log('[riders.complete] Updated pending rating with rider review');
+    } else {
+      // Legacy flow: Create a new rating (for trips without pending rating entry)
+      newRating = await ratingsDb.createRating({
+        rideRequestId: tripId,
+        raterId: riderId,
+        ratedId: trip.driver_id,
+        ratingType: 'rider_to_driver',
+        score: rating,
+        comment: comment || null,
+        permlink: permlink,
+        status: 'awaiting_response'
+      });
+      console.log('[riders.complete] Created new rating (legacy flow)');
+    }
+
+    // Create pending rating for driver to submit their counter-review
+    // Driver will reply to rider's review on Hive blockchain
+    try {
+      await ratingsDb.createPendingRating({
+        rideRequestId: tripId,
+        raterId: trip.driver_id,       // Driver will give the rating
+        ratedId: riderId,              // Rider will be rated
+        ratingType: 'driver_to_rider',
+        parentPermlink: permlink        // Driver replies to rider's review
+      });
+      console.log('[riders.complete] Created pending rating for driver to review rider');
+      
+      // Send FCM notification to driver about pending review
+      const rider = await userDb.getUserById(riderId);
+      const riderName = rider?.display_name || rider?.hive_username || 'Rider';
+      
+      await notificationService.sendDriverRatingPrompt(
+        trip.driver_id,
+        tripId,
+        riderName
+      );
+      
+      // Also send a custom notification with the permlink info
+      await notificationService._sendNotification(
+        trip.driver_id,
+        'New review received!',
+        `${riderName} has left a review for your ride. Reply on Hive to complete the rating.`,
+        {
+          type: 'pending_review',
+          requestId: String(tripId),
+          parentPermlink: permlink,
+          riderUsername: rider?.hive_username || ''
+        }
+      );
+    } catch (pendingError) {
+      // Log but don't fail if pending rating creation fails
+      console.error('[riders.complete] Failed to create driver pending rating:', pendingError.message);
+    }
 
     // Get updated user profile
     const updatedUser = await userDb.getUserById(riderId);
@@ -311,6 +370,80 @@ router.post('/pending-reviews/:tripId/complete', authenticateJWT, async (req, re
     console.error('Error completing review:', error);
     res.status(500).json({
       error: 'Failed to complete review',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/riders/pending-ratings:
+ *   get:
+ *     summary: Get pending ratings that need blockchain submission
+ *     description: Returns pending rating entries where the rider needs to submit their review on the Hive blockchain
+ *     tags: [Riders]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of pending ratings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pendingRatings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       rideRequestId:
+ *                         type: integer
+ *                       ratedName:
+ *                         type: string
+ *                       ratedUsername:
+ *                         type: string
+ *                       parentPermlink:
+ *                         type: string
+ *                         description: The Hive permlink to reply to (driver's check-in post)
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+// GET /api/riders/pending-ratings - Get pending ratings needing blockchain submission
+router.get('/pending-ratings', authenticateJWT, async (req, res) => {
+  try {
+    const riderId = req.user.id || req.user.driverId;
+    if (!riderId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const pendingRatings = await ratingsDb.getPendingRatingsForUser(riderId, 'rider_to_driver');
+
+    res.json({
+      pendingRatings: pendingRatings.map(r => ({
+        id: r.id,
+        rideRequestId: r.ride_request_id,
+        ratedName: r.rated_name,
+        ratedUsername: r.rated_username,
+        parentPermlink: r.parent_permlink,
+        tripPickup: r.pickup_address,
+        tripDropoff: r.dropoff_address,
+        tripFare: r.proposed_fare,
+        tripCompletedAt: r.completed_at,
+        createdAt: r.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching pending ratings:', error);
+    res.status(500).json({
+      error: 'Failed to fetch pending ratings',
       details: error.message
     });
   }

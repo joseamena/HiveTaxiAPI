@@ -5,8 +5,11 @@ const userDb = require('../db/users'); // updated import
 const vehiclesDb = require('../db/vehicles');
 const communitiesDb = require('../db/communities');
 const ratingsDb = require('../db/ratings');
+const rideRequestsDb = require('../db/rideRequests');
 const redisClient = require('../db/redis');
 const authenticateJWT = require('../middleware/auth');
+const notificationService = require('../services/notificationService');
+const { verifyReviewPermlink } = require('../utils/hiveValidation');
 
 // Helper function to verify user on Hive blockchain
 async function verifyUserOnHiveBlockchain(username, communityTag) {
@@ -355,6 +358,178 @@ router.put('/profile', authenticateJWT, async (req, res) => {
   } catch (error) {
     console.error('Profile update route error:', error);
     res.status(500).json({ error: 'Profile update failed', details: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/check-in:
+ *   post:
+ *     summary: Submit a driver check-in post permlink
+ *     description: Records a driver's Hive blockchain check-in post permlink. This permlink is used as the parent post that riders will reply to when submitting their reviews.
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - permlink
+ *             properties:
+ *               permlink:
+ *                 type: string
+ *                 description: The Hive blockchain permlink for the driver's check-in post
+ *                 example: "hivetaxi-checkin-2026-02-06"
+ *     responses:
+ *       200:
+ *         description: Check-in recorded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: Check-in recorded successfully
+ *                 permlink:
+ *                   type: string
+ *                 checkinAt:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: Missing permlink
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: MISSING_PERMLINK
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: User is not a driver
+ *       500:
+ *         description: Internal server error
+ */
+// POST /api/drivers/check-in - Submit driver check-in post permlink
+router.post('/check-in', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    if (!driverId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { permlink } = req.body;
+
+    if (!permlink || typeof permlink !== 'string' || permlink.trim() === '') {
+      return res.status(400).json({
+        error: 'MISSING_PERMLINK',
+        message: 'Permlink is required'
+      });
+    }
+
+    // Verify user is a driver
+    const user = await userDb.getUserById(driverId);
+    if (!user || user.type !== 'driver') {
+      return res.status(403).json({
+        error: 'NOT_A_DRIVER',
+        message: 'Only drivers can submit check-in posts'
+      });
+    }
+
+    // Update driver's check-in permlink
+    const updatedUser = await userDb.updateDriverCheckin(driverId, permlink.trim());
+
+    if (!updatedUser) {
+      return res.status(500).json({
+        error: 'UPDATE_FAILED',
+        message: 'Failed to update check-in permlink'
+      });
+    }
+
+    return res.json({
+      message: 'Check-in recorded successfully',
+      permlink: updatedUser.last_checkin_permlink,
+      checkinAt: updatedUser.last_checkin_at
+    });
+
+  } catch (error) {
+    console.error('Error in POST /api/drivers/check-in:', error);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to record check-in'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/check-in:
+ *   get:
+ *     summary: Get driver's current check-in status
+ *     description: Returns the driver's current check-in permlink and timestamp
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Check-in status retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hasCheckin:
+ *                   type: boolean
+ *                 permlink:
+ *                   type: string
+ *                   nullable: true
+ *                 checkinAt:
+ *                   type: string
+ *                   format: date-time
+ *                   nullable: true
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+// GET /api/drivers/check-in - Get driver's current check-in status
+router.get('/check-in', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    if (!driverId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const checkin = await userDb.getDriverCheckin(driverId);
+
+    if (!checkin) {
+      return res.json({
+        hasCheckin: false,
+        permlink: null,
+        checkinAt: null
+      });
+    }
+
+    return res.json({
+      hasCheckin: true,
+      permlink: checkin.permlink,
+      checkinAt: checkin.checkinAt
+    });
+
+  } catch (error) {
+    console.error('Error in GET /api/drivers/check-in:', error);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to get check-in status'
+    });
   }
 });
 
@@ -1529,6 +1704,248 @@ router.get('/pending-reviews', authenticateJWT, async (req, res) => {
     console.error('Error fetching pending reviews:', error);
     res.status(500).json({
       error: 'Failed to fetch pending reviews',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/pending-ratings:
+ *   get:
+ *     summary: Get pending ratings that need blockchain submission
+ *     description: Returns pending rating entries where the driver needs to submit their review on the Hive blockchain
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of pending ratings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pendingRatings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       rideRequestId:
+ *                         type: integer
+ *                       ratedName:
+ *                         type: string
+ *                       ratedUsername:
+ *                         type: string
+ *                       parentPermlink:
+ *                         type: string
+ *                         description: The Hive permlink to reply to
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+// GET /api/drivers/pending-ratings - Get pending ratings needing blockchain submission
+router.get('/pending-ratings', authenticateJWT, async (req, res) => {
+  try {
+    const driverId = req.user.driverId;
+    if (!driverId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const pendingRatings = await ratingsDb.getPendingRatingsForUser(driverId, 'driver_to_rider');
+
+    res.json({
+      pendingRatings: pendingRatings.map(r => ({
+        id: r.id,
+        rideRequestId: r.ride_request_id,
+        ratedName: r.rated_name,
+        ratedUsername: r.rated_username,
+        parentPermlink: r.parent_permlink,
+        tripPickup: r.pickup_address,
+        tripDropoff: r.dropoff_address,
+        tripFare: r.proposed_fare,
+        tripCompletedAt: r.completed_at,
+        createdAt: r.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching pending ratings:', error);
+    res.status(500).json({
+      error: 'Failed to fetch pending ratings',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/pending-ratings/{ratingId}/complete:
+ *   post:
+ *     summary: Complete a pending rating with blockchain permlink
+ *     description: Submit the driver's review on the Hive blockchain. After both parties have submitted, ratings are removed from DB as they live on-chain.
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: ratingId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: The pending rating ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - rating
+ *               - permlink
+ *             properties:
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 description: Rating score from 1 to 5
+ *               permlink:
+ *                 type: string
+ *                 description: The Hive blockchain permlink for the review reply
+ *               comment:
+ *                 type: string
+ *                 description: Optional review comment text
+ *     responses:
+ *       200:
+ *         description: Review completed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 ratingsDeleted:
+ *                   type: boolean
+ *                   description: Whether ratings were deleted from DB (both parties completed)
+ *       400:
+ *         description: Invalid request
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Not authorized
+ *       404:
+ *         description: Pending rating not found
+ *       422:
+ *         description: Permlink validation failed
+ *       500:
+ *         description: Internal server error
+ */
+// POST /api/drivers/pending-ratings/:ratingId/complete - Complete a pending rating
+router.post('/pending-ratings/:ratingId/complete', authenticateJWT, async (req, res) => {
+  try {
+    const ratingId = parseInt(req.params.ratingId);
+    const driverId = req.user.driverId;
+    const driverUsername = req.user.username || req.user.hiveUsername;
+    const { rating, permlink, comment } = req.body;
+
+    if (!driverId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Validate required fields
+    if (!rating || !permlink) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'Rating and permlink are required'
+      });
+    }
+
+    // Validate rating value
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        error: 'INVALID_RATING',
+        message: 'Rating must be an integer between 1 and 5'
+      });
+    }
+
+    // Get the pending rating
+    const pendingRatings = await ratingsDb.getPendingRatingsForUser(driverId, 'driver_to_rider');
+    const pendingRating = pendingRatings.find(r => r.id === ratingId);
+
+    if (!pendingRating) {
+      return res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Pending rating not found or already completed'
+      });
+    }
+
+    // Get rider info for blockchain validation
+    const rider = await userDb.getUserById(pendingRating.rated_id);
+    if (!rider) {
+      return res.status(500).json({
+        error: 'RIDER_NOT_FOUND',
+        message: 'Rider information not found'
+      });
+    }
+
+    // Validate the permlink on the blockchain
+    // The review should be a reply to the rider's review
+    const validation = await verifyReviewPermlink(
+      driverUsername,
+      permlink,
+      rider.hive_username,
+      pendingRating.parent_permlink  // Driver replies to rider's review
+    );
+
+    if (!validation.verified) {
+      return res.status(422).json({
+        error: validation.error,
+        message: validation.message
+      });
+    }
+
+    // Update the pending rating with the driver's review
+    await ratingsDb.updateRatingWithReply({
+      ratingId: ratingId,
+      score: rating,
+      comment: comment || null,
+      permlink: permlink,
+      status: 'completed'
+    });
+
+    console.log('[drivers.complete] Driver completed their review for rating:', ratingId);
+
+    // Both parties have now submitted - delete ratings from DB as they live on blockchain
+    const rideRequestId = pendingRating.ride_request_id;
+    let ratingsDeleted = false;
+
+    try {
+      // Delete all ratings for this ride (both rider_to_driver and driver_to_rider)
+      const deletedCount = await ratingsDb.deleteRatingsByRide(rideRequestId);
+      ratingsDeleted = deletedCount > 0;
+      console.log(`[drivers.complete] Deleted ${deletedCount} ratings for ride ${rideRequestId} (now on blockchain)`);
+    } catch (deleteError) {
+      console.error('[drivers.complete] Failed to delete completed ratings:', deleteError.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Review submitted successfully. Ratings now live on the blockchain.',
+      ratingsDeleted,
+      rideRequestId
+    });
+  } catch (error) {
+    console.error('Error completing driver review:', error);
+    res.status(500).json({
+      error: 'Failed to complete review',
       details: error.message
     });
   }

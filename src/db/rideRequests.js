@@ -92,9 +92,24 @@ async function getActiveRideRequestForDriver(driverId) {
   return undefined;
 }
 
+/**
+ * Assign a driver to a ride request
+ * @param {number|string} requestId - The ride request ID
+ * @param {number|string} driverId - The driver's user ID
+ * @returns {Promise<Object>} The updated ride request
+ */
+async function assignDriverToRideRequest(requestId, driverId) {
+  const result = await pool.query(
+    `UPDATE ride_requests SET driver_id = $1 WHERE id = $2 RETURNING *`,
+    [driverId, requestId]
+  );
+  return result.rows[0];
+}
+
 module.exports = {
   createRideRequest,
   getRideRequestById,
   updateRideRequestStatus,
-  getActiveRideRequestForDriver
+  getActiveRideRequestForDriver,
+  assignDriverToRideRequest
 };
