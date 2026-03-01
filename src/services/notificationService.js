@@ -82,6 +82,7 @@ class NotificationService {
         console.warn(`⚠️  Firebase not configured, skipping FCM to user ${userId}`);
         return;
       }
+      console.log(`[FCM] Sending to user ${userId} | token: ${user.fcm_token}`);
       const response = await admin.messaging().send(message);
       console.log(`FCM sent to user ${userId}:`, response);
     } catch (err) {
@@ -335,6 +336,7 @@ class NotificationService {
       console.warn(`⚠️  Firebase not configured, skipping FCM to driver ${driverId}`);
       return;
     }
+    console.log(`[FCM] Sending to driver ${driverId} | token: ${driver.fcm_token}`);
     const response = await admin.messaging().send(message);
     console.log(`FCM sent to driver ${driverId} for expired request:`, response);
   }

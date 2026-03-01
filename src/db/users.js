@@ -74,8 +74,8 @@ async function updateUserById(id, updates) {
     'is_online', 
     'type',
     'last_lat',
-    'last_long',
-    'fcm_token'
+    'last_long'
+    // fcm_token intentionally excluded — use updateFcmToken() instead
   ];
   console.log('[updateUserById] id:', id);
   console.log('[updateUserById] updates:', updates);
@@ -170,6 +170,37 @@ async function getDriverCheckin(driverId) {
 }
 
 /**
+ * Update a user's FCM token, clearing it from any other user that holds the same token.
+ * This prevents duplicate tokens across accounts on the same device.
+ * @param {number} userId - The user's ID
+ * @param {string} token - The new FCM token
+ * @returns {Promise<Object>} The updated user record
+ */
+async function updateFcmToken(userId, token) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Clear this token from any other user that currently holds it
+    await client.query(
+      `UPDATE users SET fcm_token = NULL WHERE fcm_token = $1 AND id != $2`,
+      [token, userId]
+    );
+    // Set the token on the intended user
+    const result = await client.query(
+      `UPDATE users SET fcm_token = $1 WHERE id = $2 RETURNING *`,
+      [token, userId]
+    );
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * List all users, optionally filtered by type
  */
 async function listUsers(type) {
@@ -188,6 +219,7 @@ module.exports = {
   getUserById,
   updateUser,
   updateUserById,
+  updateFcmToken,
   deleteUser,
   listUsers,
   updateDriverCheckin,

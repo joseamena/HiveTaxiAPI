@@ -254,16 +254,16 @@ router.post('/verify', async (req, res) => {
     // Clean up used challenge
     challenges.delete(username);
 
-    // Create or update driver in your system
-    const driver = await findOrCreateUser(username, type);
+    // Create or update user in your system
+    const user = await findOrCreateUser(username, type);
 
     // Generate JWT token
     const token = jwt.sign(
       { 
-        driverId: driver.id,
+        id: user.id,
         username: username,
         authMethod: 'hive_posting_key',
-        type: 'driver'
+        type: user.type || type
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -273,16 +273,16 @@ router.post('/verify', async (req, res) => {
       message: 'Hive authentication successful',
       token,
       user: {
-        id: driver.id,
+        id: user.id,
         hiveAccount: {
           name: account.name,
           reputation: account.reputation,
           created: account.created
         },
-        displayName: driver.display_name || `${account.name}`,
-        licenseNumber: driver.license_number,
-        phoneNumber: driver.phone_number,
-        verificationStatus: driver.verification_status || 'pending_verification',
+        displayName: user.display_name || `${account.name}`,
+        licenseNumber: user.license_number,
+        phoneNumber: user.phone_number,
+        verificationStatus: user.verification_status || 'pending_verification',
         authMethod: 'hive'
       }
     });

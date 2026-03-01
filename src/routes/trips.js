@@ -15,7 +15,7 @@ const notificationService = require('../services/notificationService');
 // GET /api/trips/active - Get current active trip for authenticated driver
 router.get('/active', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(400).json({ error: 'Driver ID not found in token' });
     }
@@ -55,7 +55,7 @@ router.get('/active', authenticateJWT, async (req, res) => {
 router.post('/:id/start', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     
     // Update trip status in database and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'in_transit');
@@ -92,7 +92,7 @@ router.post('/:id/start', authenticateJWT, async (req, res) => {
 router.post('/:id/complete', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     const { 
       finalOdometerReading, 
       actualDistance, 
@@ -119,14 +119,20 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     // The rider will reply to the driver's check-in post on Hive blockchain
     if (rideRequest && rideRequest.passenger_id && driverCheckin && driverCheckin.permlink) {
       try {
-        await ratingsDb.createPendingRating({
-          rideRequestId: parseInt(id),
-          raterId: rideRequest.passenger_id,      // Rider will give the rating
-          ratedId: rideRequest.driver_id,          // Driver will be rated
-          ratingType: 'rider_to_driver',
-          parentPermlink: driverCheckin.permlink   // Rider replies to driver's check-in post
-        });
-        console.log('[trips.complete] Created pending rating for rider to review driver');
+        // passenger_id is a username string, resolve to integer user ID for the ratings FK
+        const riderUser = await userDb.getUserByUsername(rideRequest.passenger_id);
+        if (!riderUser) {
+          console.error('[trips.complete] Could not resolve rider username to ID:', rideRequest.passenger_id);
+        } else {
+          await ratingsDb.createPendingRating({
+            rideRequestId: parseInt(id),
+            raterId: riderUser.id,                    // Rider will give the rating (integer ID)
+            ratedId: rideRequest.driver_id,            // Driver will be rated
+            ratingType: 'rider_to_driver',
+            parentPermlink: driverCheckin.permlink     // Rider replies to driver's check-in post
+          });
+          console.log('[trips.complete] Created pending rating for rider', riderUser.id, 'to review driver', rideRequest.driver_id, 'parentPermlink:', driverCheckin.permlink);
+        }
       } catch (ratingError) {
         // Log but don't fail trip completion if rating creation fails
         console.error('[trips.complete] Failed to create pending rating:', ratingError.message);
@@ -157,15 +163,8 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
       );
     }
     
-    // Notify driver to rate the rider (they will do this after rider submits their review)
-    if (rideRequest && rideRequest.driver_id) {
-      console.log('[trips.complete] Notifying driver to rate rider for request:', id);
-      await notificationService.sendDriverRatingPrompt(
-        rideRequest.driver_id,
-        id,
-        rideRequest.passenger_name || 'Rider'
-      );
-    }
+    // Driver will be notified later when rider submits their review
+    // (Driver reviews are created after rider submits to avoid driver replying to own post)
     
     res.json({
       message: 'Trip completed successfully',
@@ -188,18 +187,81 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
 });
 
 // POST /api/trips/:id/cancel - Cancel a trip
-router.post('/:id/cancel', (req, res) => {
+router.post('/:id/cancel', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason, cancelledBy = 'driver' } = req.body;
-    
-    if (!reason) {
+    const { reason } = req.body;
+
+    // 1. Validate trip exists
+    const rideRequest = await rideRequestsDb.getRideRequestById(id);
+    if (!rideRequest) {
+      return res.status(404).json({ error: 'Trip not found' });
+    }
+
+    // 2. Validate trip is in a cancellable state
+    const CANCELLABLE_STATUSES = ['pending', 'accepted', 'arrived_at_pickup', 'in_transit'];
+    if (!CANCELLABLE_STATUSES.includes(rideRequest.status)) {
       return res.status(400).json({
-        error: 'Cancellation reason is required'
+        error: `Trip cannot be cancelled — current status is "${rideRequest.status}"`,
+        status: rideRequest.status
       });
     }
 
-    // TODO: Update trip status, handle cancellation fee logic
+    // 3. Determine who is cancelling (use username — driver_id/passenger_id store Hive usernames)
+    const username = req.user.username;
+    const cancelledBy = rideRequest.driver_id && String(rideRequest.driver_id) === String(username)
+      ? 'driver'
+      : 'passenger';
+
+    // 4. If passenger is cancelling, verify they own this trip
+    if (cancelledBy === 'passenger' && String(rideRequest.passenger_id) !== String(username)) {
+      return res.status(403).json({ error: 'Forbidden: you are not a participant on this trip' });
+    }
+
+    console.log('[trips.cancel] Cancel request received:', {
+      tripId: id,
+      username,
+      cancelledBy,
+      reason
+    });
+
+    // 5. Update trip status in database and Redis
+    await rideRequestsDb.updateRideRequestStatus(id, 'cancelled');
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'cancelled']);
+
+    // 6. Send FCM notification to the other party
+    if (cancelledBy === 'passenger') {
+      // Rider cancelled — notify the driver
+      if (rideRequest.driver_id) {
+        console.log('[trips.cancel] Notifying driver of cancellation by passenger for request:', id);
+        const message = reason
+          ? `Your passenger has cancelled the trip. Reason: ${reason}`
+          : 'Your passenger has cancelled the trip.';
+        await notificationService.sendRiderNotification(
+          rideRequest.driver_id,
+          'Trip Cancelled',
+          message,
+          { requestId: id, type: 'trip_cancelled', cancelledBy: 'passenger', reason: reason || 'No reason provided' }
+        );
+      } else {
+        console.log('[trips.cancel] Passenger cancelled but no driver assigned yet for request:', id);
+      }
+    } else {
+      // Driver cancelled — notify the passenger
+      if (rideRequest.passenger_id) {
+        console.log('[trips.cancel] Notifying rider of cancellation by driver for request:', id);
+        const message = reason
+          ? `Your driver has cancelled the trip. Reason: ${reason}`
+          : 'Your driver has cancelled the trip. Please request a new ride.';
+        await notificationService.sendRiderNotification(
+          rideRequest.passenger_id,
+          'Trip Cancelled',
+          message,
+          { requestId: id, type: 'trip_cancelled_by_driver', tripId: id, cancelledBy: 'driver', reason: reason || 'No reason provided' }
+        );
+      }
+    }
+
     let cancellationFee = 0;
     if (cancelledBy === 'passenger' && reason === 'no_show') {
       cancellationFee = 5.00;
@@ -213,9 +275,10 @@ router.post('/:id/cancel', (req, res) => {
       cancelledBy,
       reason,
       cancellationFee,
-      earnings: cancellationFee * 0.8 // Driver gets 80% of cancellation fee
+      earnings: cancellationFee * 0.8
     });
   } catch (error) {
+    console.error('[trips.cancel] Error:', error);
     res.status(500).json({ error: 'Failed to cancel trip' });
   }
 });
@@ -359,7 +422,7 @@ router.get('/:id', (req, res) => {
 router.post('/:id/arrived', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     // Optionally: const { lat, lng } = req.body; // could be used to verify proximity
 
     // Update status in DB and Redis
@@ -465,7 +528,7 @@ router.post('/:id/rate', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const { rating, comment } = req.body;
-    const userId = req.user.id || req.user.userId;
+    const userId = req.user.id;
     
     // Validate rating
     if (!rating || rating < 1 || rating > 5) {
@@ -731,12 +794,11 @@ const ALLOWED_CURRENCIES = ['HBD', 'HIVE'];
 router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     
     console.log(`[trips.payment-request] Request for trip ${id} from token user:`, {
       driverId,
-      tokenFields: { id: req.user.id, userId: req.user.userId, driverId: req.user.driverId },
-      hiveUsername: req.user.hive_username || req.user.hiveUsername
+      username: req.user.username
     });
 
     if (!driverId) {
@@ -851,6 +913,123 @@ router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
       message: 'Failed to send payment request',
       details: error.message
     });
+  }
+});
+
+/**
+ * @swagger
+ * /api/trips/{requestId}/driver-location:
+ *   get:
+ *     summary: Get driver's current location for an active trip
+ *     description: >
+ *       Returns the driver's latest GPS position for a given trip.
+ *       The authenticated user must be the passenger on the trip.
+ *       The client should poll this endpoint on a progressive schedule
+ *       (3–15 s depending on distance) after receiving the ride_accepted
+ *       FCM message, and stop when driver_arrived is received.
+ *     tags: [Trips]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The ID of the active trip / ride request
+ *     responses:
+ *       200:
+ *         description: Driver location (or null if not yet available)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 driverLocation:
+ *                   oneOf:
+ *                     - type: object
+ *                       properties:
+ *                         latitude:
+ *                           type: number
+ *                         longitude:
+ *                           type: number
+ *                         heading:
+ *                           type: number
+ *                           nullable: true
+ *                         speed:
+ *                           type: number
+ *                           nullable: true
+ *                         updatedAt:
+ *                           type: string
+ *                           format: date-time
+ *                     - type: 'null'
+ *       401:
+ *         description: Missing, invalid, or expired JWT token
+ *       403:
+ *         description: Authenticated rider is not the passenger on this trip
+ *       404:
+ *         description: Trip not found
+ *       409:
+ *         description: Trip is not in an active state (pending, completed, cancelled, etc.)
+ */
+// GET /api/trips/:requestId/driver-location - Rider polls driver GPS position
+router.get('/:requestId/driver-location', authenticateJWT, async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const riderId = req.user.username;
+
+    // 1. Fetch trip from DB
+    const trip = await rideRequestsDb.getRideRequestById(requestId);
+    if (!trip) {
+      return res.status(404).json({ error: 'Trip not found' });
+    }
+
+    // 2. Verify trip is in an active state
+    const ACTIVE_STATUSES = ['accepted', 'in_transit'];
+    if (!ACTIVE_STATUSES.includes(trip.status)) {
+      return res.status(409).json({
+        error: 'Trip is not active',
+        status: trip.status
+      });
+    }
+
+    // 3. Verify the authenticated user is the passenger on this trip
+    if (String(trip.passenger_id) !== String(riderId)) {
+      return res.status(403).json({ error: 'Forbidden: you are not the passenger on this trip' });
+    }
+
+    // 4. Resolve driver ID — stored in Redis when driver accepts
+    const driverId = await redisClient.sendCommand(['GET', `ride:request:${requestId}:driver`]);
+    if (!driverId) {
+      // Driver not yet assigned (edge case) — return null location gracefully
+      return res.json({ driverLocation: null });
+    }
+
+    // 5. Read full location hash written by POST /api/drivers/location
+    const raw = await redisClient.sendCommand(['HGETALL', `driver:location:${driverId}`]);
+
+    // HGETALL returns null (node-redis v4+) or empty array when key doesn't exist
+    if (!raw || (Array.isArray(raw) && raw.length === 0) || Object.keys(raw).length === 0) {
+      return res.json({ driverLocation: null });
+    }
+
+    // node-redis v4 returns a plain object from HGETALL
+    const loc = Array.isArray(raw)
+      ? Object.fromEntries(raw.reduce((acc, val, i) => { if (i % 2 === 0) acc.push([val]); else acc[acc.length - 1].push(val); return acc; }, []))
+      : raw;
+
+    return res.json({
+      driverLocation: {
+        latitude:  parseFloat(loc.latitude),
+        longitude: parseFloat(loc.longitude),
+        heading:   loc.heading  ? parseFloat(loc.heading)  : null,
+        speed:     loc.speed    ? parseFloat(loc.speed)    : null,
+        updatedAt: loc.updatedAt || null
+      }
+    });
+  } catch (error) {
+    console.error('[trips.driver-location] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch driver location' });
   }
 });
 

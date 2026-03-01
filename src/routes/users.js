@@ -50,13 +50,13 @@ router.get('/:username/communities', async (req, res) => {
 // POST /api/users/fcm-token - Save FCM token for push notifications
 router.post('/fcm-token', authenticateJWT, async (req, res) => {
   try {
-    const userId = req.user.driverId;
+    const userId = req.user.id;
     const { fcmToken } = req.body;
     if (!fcmToken) {
       return res.status(400).json({ error: 'FCM token is required' });
     }
-    // Save token in database (add fcm_token field to users table if not present)
-    await userDb.updateUserById(userId, { fcm_token: fcmToken });
+    // Clear token from any other user on the same device, then save for this user
+    await userDb.updateFcmToken(userId, fcmToken);
     res.json({ message: 'FCM token saved successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save FCM token', details: error.message });

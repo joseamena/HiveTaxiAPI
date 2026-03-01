@@ -255,7 +255,7 @@ router.get('/hive-info', async (req, res) => {
 // GET /api/drivers/profile - Get driver profile
 router.get('/profile', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -325,7 +325,7 @@ router.get('/profile', authenticateJWT, async (req, res) => {
 // PUT /api/drivers/profile - Update driver profile
 router.put('/profile', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
 
     console.log('Profile update request body:', req.body);
 
@@ -421,7 +421,7 @@ router.put('/profile', authenticateJWT, async (req, res) => {
 // POST /api/drivers/check-in - Submit driver check-in post permlink
 router.post('/check-in', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -441,6 +441,16 @@ router.post('/check-in', authenticateJWT, async (req, res) => {
       return res.status(403).json({
         error: 'NOT_A_DRIVER',
         message: 'Only drivers can submit check-in posts'
+      });
+    }
+
+    // Skip update if the permlink hasn't changed
+    const currentCheckin = await userDb.getDriverCheckin(driverId);
+    if (currentCheckin && currentCheckin.permlink === permlink.trim()) {
+      return res.json({
+        message: 'Check-in already up to date',
+        permlink: currentCheckin.permlink,
+        checkinAt: currentCheckin.checkinAt
       });
     }
 
@@ -503,7 +513,7 @@ router.post('/check-in', authenticateJWT, async (req, res) => {
 // GET /api/drivers/check-in - Get driver's current check-in status
 router.get('/check-in', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -558,6 +568,9 @@ router.get('/check-in', authenticateJWT, async (req, res) => {
  *                 type: number
  *               speed:
  *                 type: number
+ *               heading:
+ *                 type: number
+ *                 description: Bearing in degrees (0–360)
  *               timestamp:
  *                 type: string
  *                 format: date-time
@@ -575,18 +588,20 @@ router.get('/check-in', authenticateJWT, async (req, res) => {
 router.post('/location', authenticateJWT, async (req, res) => {
   console.log('POST /api/drivers/location - Request body:', req.body);
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     console.log('Authenticated driverId:', driverId);
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
-    const { latitude, longitude, speed, timestamp } = req.body;
+    const { latitude, longitude, speed, heading, timestamp } = req.body;
 
     if (!latitude || !longitude) {
       return res.status(400).json({
         error: 'Latitude and longitude are required'
       });
     }
+
+    const updatedAt = new Date().toISOString();
 
     await redisClient.geoAdd('drivers:online', {
       longitude: longitude,
@@ -596,6 +611,17 @@ router.post('/location', authenticateJWT, async (req, res) => {
     // Set/update last seen timestamp for this driver (as a separate key with 5 min TTL)
     await redisClient.sendCommand(['SET', `driver:last_seen:${driverId}`, Date.now().toString()]);
     await redisClient.sendCommand(['EXPIRE', `driver:last_seen:${driverId}`, '300']);
+    // Store full location detail hash for rider polling (60s TTL)
+    await redisClient.sendCommand([
+      'HSET',
+      `driver:location:${driverId}`,
+      'latitude', String(latitude),
+      'longitude', String(longitude),
+      'heading', heading != null ? String(heading) : '',
+      'speed', speed != null ? String(speed) : '',
+      'updatedAt', updatedAt
+    ]);
+    await redisClient.sendCommand(['EXPIRE', `driver:location:${driverId}`, '60']);
     // TODO: Update location in database
     // await userDb.updateUserById(driverId, { last_lat: latitude, last_long: longitude });
     res.json({
@@ -603,8 +629,9 @@ router.post('/location', authenticateJWT, async (req, res) => {
       location: {
         latitude,
         longitude,
+        heading: heading || null,
         speed: speed || null,
-        timestamp: timestamp
+        timestamp: updatedAt
       }
     });
   } catch (error) {
@@ -644,7 +671,7 @@ router.post('/location', authenticateJWT, async (req, res) => {
 // PUT /api/drivers/online-status - Set driver online/offline in Redis only
 router.put('/online-status', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const { isOnline } = req.body;
     if (typeof isOnline !== 'boolean') {
       return res.status(400).json({ error: 'isOnline must be a boolean value' });
@@ -1119,7 +1146,7 @@ router.get('/verify/:username', async (req, res) => {
 // GET /api/drivers/vehicles - Get all vehicles for the authenticated driver
 router.get('/vehicles', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const vehicles = await vehiclesDb.getVehiclesByUserId(driverId);
     
     res.json({
@@ -1198,7 +1225,7 @@ router.get('/vehicles', authenticateJWT, async (req, res) => {
 // POST /api/drivers/vehicles - Add a new vehicle
 router.post('/vehicles', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const { make, model, year, color, plateNumber, vehicleType, seats, isPrimary } = req.body;
 
     // Validation
@@ -1318,7 +1345,7 @@ router.post('/vehicles', authenticateJWT, async (req, res) => {
 // GET /api/drivers/vehicles/:id - Get a specific vehicle
 router.get('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const vehicleId = parseInt(req.params.id);
 
     if (isNaN(vehicleId)) {
@@ -1417,7 +1444,7 @@ router.get('/vehicles/:id', authenticateJWT, async (req, res) => {
 // PUT /api/drivers/vehicles/:id - Update a vehicle
 router.put('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const vehicleId = parseInt(req.params.id);
 
     if (isNaN(vehicleId)) {
@@ -1516,7 +1543,7 @@ router.put('/vehicles/:id', authenticateJWT, async (req, res) => {
 // DELETE /api/drivers/vehicles/:id - Delete a vehicle
 router.delete('/vehicles/:id', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const vehicleId = parseInt(req.params.id);
 
     if (isNaN(vehicleId)) {
@@ -1576,7 +1603,7 @@ router.delete('/vehicles/:id', authenticateJWT, async (req, res) => {
 // PUT /api/drivers/vehicles/:id/primary - Set a vehicle as primary
 router.put('/vehicles/:id/primary', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const vehicleId = parseInt(req.params.id);
 
     if (isNaN(vehicleId)) {
@@ -1693,12 +1720,13 @@ router.put('/vehicles/:id/primary', authenticateJWT, async (req, res) => {
 // GET /api/drivers/pending-reviews - Get pending reviews for driver
 router.get('/pending-reviews', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     const limit = parseInt(req.query.limit) || 20;
     const offset = parseInt(req.query.offset) || 0;
 
     const result = await ratingsDb.getPendingReviewsForDriver(driverId, { limit, offset });
 
+    console.log('[drivers.pending-reviews] Response for driver', driverId, JSON.stringify(result, null, 2));
     res.json(result);
   } catch (error) {
     console.error('Error fetching pending reviews:', error);
@@ -1753,7 +1781,7 @@ router.get('/pending-reviews', authenticateJWT, async (req, res) => {
 // GET /api/drivers/pending-ratings - Get pending ratings needing blockchain submission
 router.get('/pending-ratings', authenticateJWT, async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -1785,7 +1813,7 @@ router.get('/pending-ratings', authenticateJWT, async (req, res) => {
 
 /**
  * @swagger
- * /api/drivers/pending-ratings/{ratingId}/complete:
+ * /api/drivers/pending-ratings/{tripId}/complete:
  *   post:
  *     summary: Complete a pending rating with blockchain permlink
  *     description: Submit the driver's review on the Hive blockchain. After both parties have submitted, ratings are removed from DB as they live on-chain.
@@ -1794,11 +1822,11 @@ router.get('/pending-ratings', authenticateJWT, async (req, res) => {
  *       - BearerAuth: []
  *     parameters:
  *       - in: path
- *         name: ratingId
+ *         name: tripId
  *         required: true
  *         schema:
  *           type: integer
- *         description: The pending rating ID
+ *         description: The trip/ride request ID
  *     requestBody:
  *       required: true
  *       content:
@@ -1848,12 +1876,12 @@ router.get('/pending-ratings', authenticateJWT, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-// POST /api/drivers/pending-ratings/:ratingId/complete - Complete a pending rating
-router.post('/pending-ratings/:ratingId/complete', authenticateJWT, async (req, res) => {
+// POST /api/drivers/pending-ratings/:tripId/complete - Complete a pending rating
+router.post('/pending-ratings/:tripId/complete', authenticateJWT, async (req, res) => {
   try {
-    const ratingId = parseInt(req.params.ratingId);
-    const driverId = req.user.driverId;
-    const driverUsername = req.user.username || req.user.hiveUsername;
+    const tripId = parseInt(req.params.tripId);
+    const driverId = req.user.id;
+    const driverUsername = req.user.username;
     const { rating, permlink, comment } = req.body;
 
     if (!driverId) {
@@ -1876,9 +1904,9 @@ router.post('/pending-ratings/:ratingId/complete', authenticateJWT, async (req, 
       });
     }
 
-    // Get the pending rating
+    // Get the pending rating for this trip
     const pendingRatings = await ratingsDb.getPendingRatingsForUser(driverId, 'driver_to_rider');
-    const pendingRating = pendingRatings.find(r => r.id === ratingId);
+    const pendingRating = pendingRatings.find(r => r.ride_request_id === tripId);
 
     if (!pendingRating) {
       return res.status(404).json({
@@ -1887,58 +1915,37 @@ router.post('/pending-ratings/:ratingId/complete', authenticateJWT, async (req, 
       });
     }
 
-    // Get rider info for blockchain validation
-    const rider = await userDb.getUserById(pendingRating.rated_id);
-    if (!rider) {
-      return res.status(500).json({
-        error: 'RIDER_NOT_FOUND',
-        message: 'Rider information not found'
-      });
-    }
-
-    // Validate the permlink on the blockchain
-    // The review should be a reply to the rider's review
-    const validation = await verifyReviewPermlink(
-      driverUsername,
-      permlink,
-      rider.hive_username,
-      pendingRating.parent_permlink  // Driver replies to rider's review
-    );
-
-    if (!validation.verified) {
-      return res.status(422).json({
-        error: validation.error,
-        message: validation.message
-      });
-    }
-
     // Update the pending rating with the driver's review
+    // Note: We don't verify the permlink on-chain here because the block may not be mined yet
     await ratingsDb.updateRatingWithReply({
-      ratingId: ratingId,
+      ratingId: pendingRating.id,
       score: rating,
       comment: comment || null,
       permlink: permlink,
       status: 'completed'
     });
 
-    console.log('[drivers.complete] Driver completed their review for rating:', ratingId);
+    console.log('[drivers.complete] Driver completed their review for trip:', tripId);
 
-    // Both parties have now submitted - delete ratings from DB as they live on blockchain
+    // Check if both parties have completed - if so, delete ratings as they're now on blockchain
     const rideRequestId = pendingRating.ride_request_id;
     let ratingsDeleted = false;
 
     try {
-      // Delete all ratings for this ride (both rider_to_driver and driver_to_rider)
       const deletedCount = await ratingsDb.deleteRatingsByRide(rideRequestId);
       ratingsDeleted = deletedCount > 0;
-      console.log(`[drivers.complete] Deleted ${deletedCount} ratings for ride ${rideRequestId} (now on blockchain)`);
+      if (deletedCount > 0) {
+        console.log(`[drivers.complete] Deleted ${deletedCount} ratings for ride ${rideRequestId} (both parties completed, now on blockchain)`);
+      } else {
+        console.log(`[drivers.complete] Ratings not deleted for ride ${rideRequestId} (waiting for other party to complete)`);
+      }
     } catch (deleteError) {
       console.error('[drivers.complete] Failed to delete completed ratings:', deleteError.message);
     }
 
     res.json({
       success: true,
-      message: 'Review submitted successfully. Ratings now live on the blockchain.',
+      message: 'Review submitted successfully.',
       ratingsDeleted,
       rideRequestId
     });

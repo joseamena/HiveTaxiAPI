@@ -12,7 +12,7 @@ const pool = require('./index');
  * @param {string} [params.comment] - Optional comment/review
  * @param {string} [params.permlink] - Optional Hive blockchain permlink for the review
  * @param {string} [params.parentPermlink] - Optional Hive blockchain permlink of the parent post being replied to
- * @param {string} [params.status] - Rating status: 'pending', 'awaiting_response', or 'completed'
+ * @param {string} [params.status] - Rating status: 'pending', 'awaiting_reply', or 'completed'
  * @returns {Promise<Object>} The created rating
  */
 async function createRating({ rideRequestId, raterId, ratedId, ratingType, score, comment, permlink, parentPermlink, status = 'completed' }) {
@@ -58,10 +58,10 @@ async function createPendingRating({ rideRequestId, raterId, ratedId, ratingType
  * @param {number} params.score - Rating score from 1-5
  * @param {string} [params.comment] - Optional comment/review
  * @param {string} params.permlink - The Hive permlink of the submitted review
- * @param {string} [params.status] - New status (default: 'awaiting_response')
+ * @param {string} [params.status] - New status (default: 'awaiting_reply')
  * @returns {Promise<Object>} The updated rating
  */
-async function updateRatingWithReply({ ratingId, score, comment, permlink, status = 'awaiting_response' }) {
+async function updateRatingWithReply({ ratingId, score, comment, permlink, status = 'awaiting_reply' }) {
   const result = await pool.query(
     `UPDATE ratings 
      SET score = $1, comment = $2, permlink = $3, status = $4
@@ -137,6 +137,20 @@ async function updateRatingStatus(ratingId, status) {
 }
 
 /**
+ * Update parent permlink for a pending rating
+ * @param {number} ratingId - The rating ID
+ * @param {string} parentPermlink - The parent permlink to set
+ * @returns {Promise<Object>} The updated rating
+ */
+async function updateRatingParentPermlink(ratingId, parentPermlink) {
+  const result = await pool.query(
+    `UPDATE ratings SET parent_permlink = $1 WHERE id = $2 RETURNING *`,
+    [parentPermlink, ratingId]
+  );
+  return result.rows[0];
+}
+
+/**
  * Delete a completed rating (since it now lives on the blockchain)
  * @param {number} ratingId - The rating ID to delete
  * @returns {Promise<Object|null>} The deleted rating or null
@@ -150,11 +164,31 @@ async function deleteRating(ratingId) {
 }
 
 /**
- * Delete ratings by ride request ID (for cleanup after blockchain completion)
+ * Delete ratings by ride request ID only if both parties have completed
  * @param {number} rideRequestId - The ride request ID
- * @returns {Promise<number>} Number of deleted ratings
+ * @returns {Promise<number>} Number of deleted ratings (0 if not both completed)
  */
 async function deleteRatingsByRide(rideRequestId) {
+  // First check if both ratings exist and are completed
+  const checkResult = await pool.query(
+    `SELECT rating_type, status 
+     FROM ratings 
+     WHERE ride_request_id = $1`,
+    [rideRequestId]
+  );
+  
+  const ratings = checkResult.rows;
+  
+  // Check if we have both types and both are completed
+  const hasRiderToDriver = ratings.some(r => r.rating_type === 'rider_to_driver' && r.status === 'completed');
+  const hasDriverToRider = ratings.some(r => r.rating_type === 'driver_to_rider' && r.status === 'completed');
+  
+  if (!hasRiderToDriver || !hasDriverToRider) {
+    // Not both completed yet, don't delete
+    return 0;
+  }
+  
+  // Both are completed, safe to delete
   const result = await pool.query(
     `DELETE FROM ratings WHERE ride_request_id = $1`,
     [rideRequestId]
@@ -355,7 +389,7 @@ async function getUserRatingStats(userId) {
  */
 async function ratingExists(rideRequestId, ratingType) {
   const result = await pool.query(
-    `SELECT EXISTS(SELECT 1 FROM ratings WHERE ride_request_id = $1 AND rating_type = $2) as exists`,
+    `SELECT EXISTS(SELECT 1 FROM ratings WHERE ride_request_id = $1 AND rating_type = $2 AND status != 'pending') as exists`,
     [rideRequestId, ratingType]
   );
   return result.rows[0].exists;
@@ -407,6 +441,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
          SELECT 1 FROM ratings r 
          WHERE r.ride_request_id = rq.id 
            AND r.rating_type = 'rider_to_driver'
+           AND r.status != 'pending'
        )`,
     [riderId]
   );
@@ -424,10 +459,12 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
        u.display_name as driver_display_name,
        u.hive_username as driver_hive_username,
        u.rating as driver_rating,
+       COALESCE(u.last_checkin_permlink, pr.parent_permlink) as parent_permlink,
        EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_since_completion,
        48 - EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_remaining
      FROM ride_requests rq
      JOIN users u ON rq.driver_id = u.id
+     LEFT JOIN ratings pr ON pr.ride_request_id = rq.id AND pr.rating_type = 'rider_to_driver' AND pr.status = 'pending'
      WHERE rq.passenger_id = $1::text
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
@@ -435,6 +472,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
          SELECT 1 FROM ratings r 
          WHERE r.ride_request_id = rq.id 
            AND r.rating_type = 'rider_to_driver'
+           AND r.status != 'pending'
        )
      ORDER BY rq.completed_at DESC
      LIMIT $2 OFFSET $3`,
@@ -458,6 +496,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
         cost: row.proposed_fare
       },
       tripDate: row.completed_at,
+      parentPermlink: row.parent_permlink || null,
       expiresAt: new Date(new Date(row.completed_at).getTime() + 48 * 60 * 60 * 1000).toISOString(),
       reviewWindow: {
         hoursSinceCompletion: parseFloat(row.hours_since_completion).toFixed(1),
@@ -491,6 +530,7 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
          SELECT 1 FROM ratings r 
          WHERE r.ride_request_id = rq.id 
            AND r.rating_type = 'driver_to_rider'
+           AND r.status != 'pending'
        )`,
     [driverId]
   );
@@ -504,12 +544,15 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
        rq.dropoff_address,
        rq.completed_at,
        rq.proposed_fare,
+       u.id as rider_id,
        u.display_name as rider_display_name,
        u.hive_username as rider_hive_username,
+       pr.parent_permlink,
        EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_since_completion,
        48 - EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_remaining
      FROM ride_requests rq
-     JOIN users u ON rq.passenger_id::integer = u.id
+     LEFT JOIN users u ON rq.passenger_id = u.hive_username
+     LEFT JOIN ratings pr ON pr.ride_request_id = rq.id AND pr.rating_type = 'driver_to_rider' AND pr.status = 'pending'
      WHERE rq.driver_id = $1
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
@@ -517,6 +560,7 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
          SELECT 1 FROM ratings r 
          WHERE r.ride_request_id = rq.id 
            AND r.rating_type = 'driver_to_rider'
+           AND r.status != 'pending'
        )
      ORDER BY rq.completed_at DESC
      LIMIT $2 OFFSET $3`,
@@ -527,9 +571,9 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
     pendingReviews: result.rows.map(row => ({
       rideRequestId: row.ride_request_id,
       rider: {
-        id: row.passenger_id,
+        id: row.rider_id || null,
         name: row.rider_display_name || row.passenger_name,
-        hiveUsername: row.rider_hive_username
+        hiveUsername: row.rider_hive_username || row.passenger_id
       },
       trip: {
         pickupAddress: row.pickup_address,
@@ -537,6 +581,7 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
         completedAt: row.completed_at,
         fare: row.proposed_fare
       },
+      parentPermlink: row.parent_permlink || null,
       reviewWindow: {
         hoursSinceCompletion: parseFloat(row.hours_since_completion).toFixed(1),
         hoursRemaining: Math.max(0, parseFloat(row.hours_remaining)).toFixed(1)
@@ -555,6 +600,7 @@ module.exports = {
   getPendingRatingsForUser,
   getPendingRatingByRideAndType,
   updateRatingStatus,
+  updateRatingParentPermlink,
   deleteRating,
   deleteRatingsByRide,
   getRatingByRideAndType,

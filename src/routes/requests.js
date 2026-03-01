@@ -132,7 +132,7 @@ router.post('/:id/accept', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const { estimatedArrival } = req.body;
-    const driverId = req.user.id || req.user.userId || req.user.driverId;
+    const driverId = req.user.id;
     if (!driverId) {
       return res.status(400).json({ error: 'Driver ID not found in token' });
     }
