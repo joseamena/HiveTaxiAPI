@@ -101,8 +101,11 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
       notes 
     } = req.body;
     
-    // Update trip status in database, then clean up Redis keys (DB is source of truth for final state)
+    // Update trip status in database, then persist driver responses and clean up Redis keys
     await rideRequestsDb.updateRideRequestStatus(id, 'completed');
+    const rawResponses = await redisClient.lRange(`ride:request:${id}:responses`, 0, -1);
+    const parsedResponses = rawResponses.map(r => JSON.parse(r));
+    await rideRequestsDb.saveDriverResponses(id, parsedResponses);
     await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
     
     // Get ride request from DB to obtain proposedFare and passenger info
@@ -225,8 +228,11 @@ router.post('/:id/cancel', authenticateJWT, async (req, res) => {
       reason
     });
 
-    // 5. Update trip status in database, then clean up Redis keys (DB is source of truth for final state)
+    // 5. Update trip status in database, then persist driver responses and clean up Redis keys
     await rideRequestsDb.updateRideRequestStatus(id, 'cancelled');
+    const rawResponses = await redisClient.lRange(`ride:request:${id}:responses`, 0, -1);
+    const parsedResponses = rawResponses.map(r => JSON.parse(r));
+    await rideRequestsDb.saveDriverResponses(id, parsedResponses);
     await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
 
     // 6. Send FCM notification to the other party

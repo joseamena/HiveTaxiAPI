@@ -106,10 +106,28 @@ async function assignDriverToRideRequest(requestId, driverId) {
   return result.rows[0];
 }
 
+/**
+ * Save driver responses from Redis to the database when a trip ends.
+ * @param {number|string} rideRequestId
+ * @param {Array<{driverId: string, response: string, timestamp: string}>} responses - parsed Redis list entries
+ */
+async function saveDriverResponses(rideRequestId, responses) {
+  if (!responses || responses.length === 0) return;
+  const values = responses.map((r, i) =>
+    `(${parseInt(rideRequestId)}, ${parseInt(r.driverId)}, '${r.response}', ${i + 1}, '${r.timestamp}')`
+  ).join(', ');
+  await pool.query(
+    `INSERT INTO driver_responses (ride_request_id, driver_id, response, queue_position, responded_at)
+     VALUES ${values}
+     ON CONFLICT DO NOTHING`
+  );
+}
+
 module.exports = {
   createRideRequest,
   getRideRequestById,
   updateRideRequestStatus,
   getActiveRideRequestForDriver,
-  assignDriverToRideRequest
+  assignDriverToRideRequest,
+  saveDriverResponses
 };
