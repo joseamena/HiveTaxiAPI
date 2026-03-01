@@ -59,7 +59,7 @@ router.post('/:id/start', authenticateJWT, async (req, res) => {
     
     // Update trip status in database and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'in_transit');
-    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'in_transit']);
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'in_transit', 'EX', '86400']);
 
     // Fetch ride request to get passengerId and notify rider
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
@@ -101,9 +101,9 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
       notes 
     } = req.body;
     
-    // Update trip status in database and Redis
+    // Update trip status in database, then clean up Redis keys (DB is source of truth for final state)
     await rideRequestsDb.updateRideRequestStatus(id, 'completed');
-    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'completed']);
+    await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
     
     // Get ride request from DB to obtain proposedFare and passenger info
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
@@ -225,9 +225,9 @@ router.post('/:id/cancel', authenticateJWT, async (req, res) => {
       reason
     });
 
-    // 5. Update trip status in database and Redis
+    // 5. Update trip status in database, then clean up Redis keys (DB is source of truth for final state)
     await rideRequestsDb.updateRideRequestStatus(id, 'cancelled');
-    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'cancelled']);
+    await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
 
     // 6. Send FCM notification to the other party
     if (cancelledBy === 'passenger') {
@@ -427,7 +427,7 @@ router.post('/:id/arrived', authenticateJWT, async (req, res) => {
 
     // Update status in DB and Redis
     await rideRequestsDb.updateRideRequestStatus(id, 'arrived_at_pickup');
-    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'arrived_at_pickup']);
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'arrived_at_pickup', 'EX', '86400']);
 
     // Fetch ride request to get passengerId
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
