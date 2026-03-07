@@ -46,12 +46,7 @@ class NotificationService {
    */
   async _sendNotification(userId, title, body, data = {}) {
     try {
-      let user;
-      if (typeof userId === 'number' || (!isNaN(userId) && userId !== '')) {
-        user = await userDb.getUserById(Number(userId));
-      } else {
-        user = await userDb.getUserByUsername(userId);
-      }
+      const user = await userDb.getUserById(Number(userId));
       if (!user || !user.fcm_token) {
         console.log(`User ${userId} not found or doesn't have FCM token`);
         return;

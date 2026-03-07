@@ -422,7 +422,7 @@ async function isRatingWindowExpired(rideRequestId) {
 
 /**
  * Get pending reviews for a rider (completed rides where rider hasn't rated the driver yet)
- * @param {number} riderId - The rider's user ID
+ * @param {number} riderId - The rider's integer user ID (users.id)
  * @param {Object} [options] - Query options
  * @param {number} [options.limit=20] - Maximum number of results
  * @param {number} [options.offset=0] - Offset for pagination
@@ -434,7 +434,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
   const countResult = await pool.query(
     `SELECT COUNT(*) as total
      FROM ride_requests rq
-     WHERE rq.passenger_id = $1::text
+     WHERE rq.passenger_id = $1
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
        AND NOT EXISTS (
@@ -465,7 +465,7 @@ async function getPendingReviewsForRider(riderId, { limit = 20, offset = 0 } = {
      FROM ride_requests rq
      JOIN users u ON rq.driver_id = u.id
      LEFT JOIN ratings pr ON pr.ride_request_id = rq.id AND pr.rating_type = 'rider_to_driver' AND pr.status = 'pending'
-     WHERE rq.passenger_id = $1::text
+     WHERE rq.passenger_id = $1
        AND rq.status = 'completed'
        AND rq.completed_at >= NOW() - INTERVAL '48 hours'
        AND NOT EXISTS (
@@ -539,7 +539,6 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
     `SELECT 
        rq.id as ride_request_id,
        rq.passenger_id,
-       rq.passenger_name,
        rq.pickup_address,
        rq.dropoff_address,
        rq.completed_at,
@@ -551,7 +550,7 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
        EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_since_completion,
        48 - EXTRACT(EPOCH FROM (NOW() - rq.completed_at)) / 3600 as hours_remaining
      FROM ride_requests rq
-     LEFT JOIN users u ON rq.passenger_id = u.hive_username
+     LEFT JOIN users u ON u.id = rq.passenger_id
      LEFT JOIN ratings pr ON pr.ride_request_id = rq.id AND pr.rating_type = 'driver_to_rider' AND pr.status = 'pending'
      WHERE rq.driver_id = $1
        AND rq.status = 'completed'
@@ -572,8 +571,8 @@ async function getPendingReviewsForDriver(driverId, { limit = 20, offset = 0 } =
       rideRequestId: row.ride_request_id,
       rider: {
         id: row.rider_id || null,
-        name: row.rider_display_name || row.passenger_name,
-        hiveUsername: row.rider_hive_username || row.passenger_id
+        name: row.rider_display_name || row.rider_hive_username,
+        hiveUsername: row.rider_hive_username
       },
       trip: {
         pickupAddress: row.pickup_address,

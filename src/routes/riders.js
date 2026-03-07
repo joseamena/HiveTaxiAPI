@@ -98,7 +98,7 @@ const notificationService = require('../services/notificationService');
 // GET /api/riders/pending-reviews - Get pending reviews for rider
 router.get('/pending-reviews', authenticateJWT, async (req, res) => {
   try {
-    const riderId = req.user.username;
+    const riderId = req.user.id;
     const limit = parseInt(req.query.limit) || 20;
     const offset = parseInt(req.query.offset) || 0;
 
@@ -218,9 +218,8 @@ router.post('/pending-reviews/:tripId/complete', authenticateJWT, async (req, re
     }
 
     // Verify the rider is the passenger of this trip
-    // passenger_id is stored as hive username string, not integer user ID
-    if (trip.passenger_id !== String(riderId) && trip.passenger_id !== riderUsername) {
-      console.log('[riders.complete] Auth mismatch - passenger_id:', trip.passenger_id, 'riderId:', riderId, 'riderUsername:', riderUsername);
+    if (trip.passenger_id !== riderId) {
+      console.log('[riders.complete] Auth mismatch - passenger_id:', trip.passenger_id, 'riderId:', riderId);
       return res.status(403).json({
         error: 'NOT_AUTHORIZED',
         message: 'You are not authorized to review this trip'

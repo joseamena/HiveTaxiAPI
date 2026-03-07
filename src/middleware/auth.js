@@ -11,7 +11,7 @@ function authenticateJWT(req, res, next) {
   
   // TESTING: Allow fake token to resolve to coolmole user
   if (token === fakeTestToken) {
-    req.user = { id: 'coolmole', username: "coolmole", authMethod: "hive_posting_key", type: "driver" };
+    req.user = { id: 12, username: "coolmole", authMethod: "hive_posting_key", type: "driver" };
     return next();
   }
   

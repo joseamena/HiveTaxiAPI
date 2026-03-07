@@ -4,6 +4,7 @@ const redisClient = require('../db/redis');
 const rideRequestsDb = require('../db/rideRequests');
 const notificationService = require('../services/notificationService');
 const usersDb = require('../db/users');
+const communitiesDb = require('../db/communities');
 const { findFreshNearbyDrivers } = require('../utils/driverGeo');
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
@@ -154,11 +155,12 @@ router.post('/:id/accept', authenticateJWT, async (req, res) => {
     notificationService.sendRideAcceptedToRider(rideRequest.passenger_id, id, driverId, estimatedArrival);
 
     console.log('Ride request found:', rideRequest);
+    const passenger = await usersDb.getUserById(rideRequest.passenger_id);
     // Construct Trip object with camelCase keys
     const trip = {
-      passengerPhone: rideRequest.passenger_phone,
+      passengerPhone: passenger?.phone_number || '',
       passengerId: rideRequest.passenger_id,
-      passengerName: rideRequest.passenger_name,
+      passengerName: passenger?.display_name || passenger?.hive_username || '',
       pickup: {
         address: rideRequest.pickup_address,
         latitude: rideRequest.pickup_lat,
@@ -273,9 +275,6 @@ router.post('/', authenticateJWT, async (req, res) => {
   console.log("requests", req.body);
   try {
     const {
-      passengerId,
-      passengerName,
-      passengerPhone,
       pickup,
       dropoff,
       estimatedDistance,
@@ -284,17 +283,23 @@ router.post('/', authenticateJWT, async (req, res) => {
       priority
     } = req.body;
 
+    // Always derive passengerId from the authenticated user — never trust the body
+    const passengerId = req.user.id;
+
     console.log("authenticated user:", req.user);
     // Validate input (basic)
     if (!pickup || !pickup.lat || !pickup.lng) {
       return res.status(400).json({ error: 'Pickup location required' });
     }
 
+    // Look up passenger info for driver notifications
+    const passenger = await usersDb.getUserById(passengerId);
+    const passengerName = passenger?.display_name || passenger?.hive_username || '';
+    const passengerPhone = passenger?.phone_number || '';
+
     // Save to database
     const newRequest = await rideRequestsDb.createRideRequest({
       passengerId,
-      passengerName,
-      passengerPhone,
       pickup,
       dropoff,
       estimatedDistance,
@@ -348,8 +353,25 @@ async function findDriversAndCreateQueueForRequest(rideRequest, meta) {
       count: 10
     }).then(async (freshDrivers) => {
       console.log('[findDriversAndCreateQueueForRequest] freshDrivers result:', freshDrivers);
-      if (freshDrivers.length > 0) {
-        const queueLength = await notificationService.createDriverQueue(rideRequest.id, freshDrivers);
+
+      // Filter by community: only dispatch to drivers who share a community with the rider
+      let driversToQueue = freshDrivers;
+      const communityDriverIds = await communitiesDb.getDriverIdsInRiderCommunities(rideRequest.passenger_id);
+      if (communityDriverIds.length > 0) {
+        const communityDriverIdSet = new Set(communityDriverIds.map(String));
+        const communityFreshDrivers = freshDrivers.filter(d => communityDriverIdSet.has(d.driverId));
+        if (communityFreshDrivers.length > 0) {
+          driversToQueue = communityFreshDrivers;
+          console.log(`[community dispatch] Filtered to ${driversToQueue.length} community drivers for request ${rideRequest.id}`);
+        } else {
+          console.log(`[community dispatch] No community drivers nearby for request ${rideRequest.id}, falling back to all ${freshDrivers.length} nearby drivers`);
+        }
+      } else {
+        console.log(`[community dispatch] Rider has no communities, using all ${freshDrivers.length} nearby drivers for request ${rideRequest.id}`);
+      }
+
+      if (driversToQueue.length > 0) {
+        const queueLength = await notificationService.createDriverQueue(rideRequest.id, driversToQueue);
         console.log(`Created driver queue with ${queueLength} drivers for request ${rideRequest.id}`);
         await notificationService.processDriverQueue(rideRequest.id, meta);
       } else {

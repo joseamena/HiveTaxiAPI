@@ -87,11 +87,31 @@ async function listCommunityMembers(hiveTag, role) {
   return result.rows;
 }
 
+/**
+ * Get the integer user IDs of all drivers who share at least one community with the given rider.
+ * Returns an empty array if the rider belongs to no communities.
+ * @param {number} riderUserId - The rider's integer user ID
+ * @returns {Promise<number[]>}
+ */
+async function getDriverIdsInRiderCommunities(riderUserId) {
+  const result = await pool.query(
+    `SELECT DISTINCT uc_driver.user_id
+     FROM user_communities uc_rider
+     JOIN user_communities uc_driver ON uc_driver.community_id = uc_rider.community_id
+     WHERE uc_rider.user_id = $1
+       AND uc_driver.user_id != $1
+       AND uc_driver.role = 'Driver'`,
+    [riderUserId]
+  );
+  return result.rows.map(row => row.user_id);
+}
+
 module.exports = {
   ensureCommunity,
   getCommunityByTag,
   addUserToCommunity,
   getUserCommunityRole,
   listUserCommunities,
-  listCommunityMembers
+  listCommunityMembers,
+  getDriverIdsInRiderCommunities
 };

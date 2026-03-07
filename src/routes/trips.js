@@ -29,9 +29,7 @@ router.get('/active', authenticateJWT, async (req, res) => {
       requestId: activeRequest.id,
       status: activeRequest.status,
       passenger: {
-        id: activeRequest.passenger_id,
-        name: activeRequest.passenger_name,
-        phone: activeRequest.passenger_phone || ''
+        id: activeRequest.passenger_id
       },
       pickup: {
         latitude: activeRequest.pickup_lat,
@@ -210,14 +208,14 @@ router.post('/:id/cancel', authenticateJWT, async (req, res) => {
       });
     }
 
-    // 3. Determine who is cancelling (use username — driver_id/passenger_id store Hive usernames)
-    const username = req.user.username;
-    const cancelledBy = rideRequest.driver_id && String(rideRequest.driver_id) === String(username)
+    // 3. Determine who is cancelling
+    const userId = req.user.id;
+    const cancelledBy = rideRequest.driver_id && rideRequest.driver_id === userId
       ? 'driver'
       : 'passenger';
 
     // 4. If passenger is cancelling, verify they own this trip
-    if (cancelledBy === 'passenger' && String(rideRequest.passenger_id) !== String(username)) {
+    if (cancelledBy === 'passenger' && rideRequest.passenger_id !== userId) {
       return res.status(403).json({ error: 'Forbidden: you are not a participant on this trip' });
     }
 
@@ -906,8 +904,7 @@ router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
         invoice
       },
       sentTo: {
-        riderId: rideRequest.passenger_id,
-        riderName: rideRequest.passenger_name
+        riderId: rideRequest.passenger_id
       },
       timestamp: new Date().toISOString()
     });
@@ -1000,7 +997,7 @@ router.get('/:requestId/driver-location', authenticateJWT, async (req, res) => {
     }
 
     // 3. Verify the authenticated user is the passenger on this trip
-    if (String(trip.passenger_id) !== String(riderId)) {
+    if (trip.passenger_id !== riderId) {
       return res.status(403).json({ error: 'Forbidden: you are not the passenger on this trip' });
     }
 

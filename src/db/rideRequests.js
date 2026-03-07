@@ -6,8 +6,6 @@ const pool = require('./index');
  */
 async function createRideRequest({
   passengerId,
-  passengerName,
-  passengerPhone,
   pickup,
   dropoff,
   estimatedDistance,
@@ -19,17 +17,15 @@ async function createRideRequest({
 }) {
   const result = await pool.query(
     `INSERT INTO ride_requests (
-      passenger_id, passenger_name, passenger_phone,
+      passenger_id,
       pickup_lat, pickup_lng, pickup_address,
       dropoff_lat, dropoff_lng, dropoff_address,
       estimated_distance, estimated_duration, proposed_fare,
       priority, request_time, status
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     RETURNING *`,
     [
       passengerId,
-      passengerName,
-      passengerPhone,
       pickup.lat,
       pickup.lng,
       pickup.address,
