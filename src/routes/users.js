@@ -55,10 +55,13 @@ router.post('/fcm-token', authenticateJWT, async (req, res) => {
     if (!fcmToken) {
       return res.status(400).json({ error: 'FCM token is required' });
     }
+    console.log(`[FCM] Token update requested for user ${userId} (${req.user.hive_username}) token=${fcmToken.slice(0, 20)}...`);
     // Clear token from any other user on the same device, then save for this user
     await userDb.updateFcmToken(userId, fcmToken);
+    console.log(`[FCM] Token updated successfully for user ${userId} (${req.user.hive_username})`);
     res.json({ message: 'FCM token saved successfully' });
   } catch (error) {
+    console.error(`[FCM] Failed to update token for user ${req.user?.id}:`, error.message);
     res.status(500).json({ error: 'Failed to save FCM token', details: error.message });
   }
 });

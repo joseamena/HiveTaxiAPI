@@ -137,6 +137,12 @@ router.post('/:id/accept', authenticateJWT, async (req, res) => {
     if (!driverId) {
       return res.status(400).json({ error: 'Driver ID not found in token' });
     }
+    // Guard: driver must not already have an active trip
+    const existingTrip = await rideRequestsDb.getActiveRideRequestForDriver(driverId);
+    if (existingTrip) {
+      return res.status(409).json({ error: `You already have an active trip (#${existingTrip.id})` });
+    }
+
     // Handle driver response through notification service
     const accepted = await notificationService.handleDriverResponse(id, String(driverId), 'accept', estimatedArrival);
     if (!accepted) {

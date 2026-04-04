@@ -444,6 +444,42 @@ router.post('/check-in', authenticateJWT, async (req, res) => {
       });
     }
 
+    // If driver has an active community, enforce membership status
+    if (user.active_community_id) {
+      const pool = require('../db');
+      const membershipRes = await pool.query(
+        `SELECT uc.status, c.hive_tag
+         FROM user_communities uc
+         JOIN communities c ON c.id = uc.community_id
+         WHERE uc.user_id = $1 AND uc.community_id = $2`,
+        [driverId, user.active_community_id]
+      );
+      const membership = membershipRes.rows[0];
+
+      if (membership) {
+        if (membership.status === 'revoked') {
+          return res.status(403).json({
+            error: 'MEMBERSHIP_REVOKED',
+            message: 'Your membership in this community has been revoked. Please contact the community operator.'
+          });
+        }
+
+        if (membership.status === 'pending') {
+          // On-demand blockchain verify — catches the case where the sync hasn't run yet
+          const { verifyUserInCommunity } = require('../utils/hiveClient');
+          const verification = await verifyUserInCommunity(user.hive_username, membership.hive_tag);
+          if (verification.verified) {
+            await communitiesDb.approveMembership(driverId, user.active_community_id);
+          } else {
+            return res.status(403).json({
+              error: 'MEMBERSHIP_PENDING',
+              message: 'Your community membership is pending approval. A community mod or admin must grant you member status on the Hive blockchain.'
+            });
+          }
+        }
+      }
+    }
+
     // Skip update if the permlink hasn't changed
     const currentCheckin = await userDb.getDriverCheckin(driverId);
     if (currentCheckin && currentCheckin.permlink === permlink.trim()) {
@@ -1955,6 +1991,111 @@ router.post('/pending-ratings/:tripId/complete', authenticateJWT, async (req, re
       error: 'Failed to complete review',
       details: error.message
     });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/communities:
+ *   get:
+ *     summary: Get communities for the authenticated driver
+ *     description: Returns all community memberships (with lifecycle status) and the driver's active community.
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Communities retrieved successfully
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/communities', authenticateJWT, async (req, res) => {
+  try {
+    const user = await userDb.getUserByUsername(req.user.username);
+    const { communities, activeCommunityId } = await communitiesDb.getDriverCommunities(user.id);
+
+    // Resolve active community hiveTag for the response
+    let activeCommunity = null;
+    if (activeCommunityId) {
+      const active = communities.find(c => c.id === activeCommunityId);
+      activeCommunity = active ? active.hive_tag : null;
+    }
+
+    res.json({
+      communities: communities.map(c => ({
+        id: c.hive_tag,
+        displayName: c.name,
+        hiveAccount: `@${c.hive_tag}`,
+        status: c.status,
+        joinedAt: c.joined_at,
+        declineReason: c.decline_reason || null
+      })),
+      activeCommunity
+    });
+  } catch (error) {
+    console.error('Error fetching driver communities:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to fetch communities', details: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/drivers/community/active:
+ *   put:
+ *     summary: Set the driver's active community
+ *     description: Updates which community the driver's check-in posts target. Requires an approved membership.
+ *     tags: [Drivers]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [communityId]
+ *             properties:
+ *               communityId:
+ *                 type: integer
+ *                 description: The numeric ID of the community to make active
+ *     responses:
+ *       200:
+ *         description: Active community updated
+ *       400:
+ *         description: Missing communityId
+ *       403:
+ *         description: Driver does not have an approved membership in this community
+ *       404:
+ *         description: Community not found
+ *       500:
+ *         description: Internal server error
+ */
+router.put('/community/active', authenticateJWT, async (req, res) => {
+  try {
+    const { communityId } = req.body;
+    if (!communityId) {
+      return res.status(400).json({ error: 'MISSING_PARAMETER', message: 'communityId is required' });
+    }
+
+    const user = await userDb.getUserByUsername(req.user.username);
+    const community = await communitiesDb.setActiveCommunity(user.id, parseInt(communityId));
+
+    res.json({
+      message: 'Active community updated',
+      activeCommunity: {
+        id: community.hive_tag,
+        displayName: community.name,
+        hiveAccount: `@${community.hive_tag}`
+      }
+    });
+  } catch (error) {
+    if (error.code === 'NOT_APPROVED') {
+      return res.status(403).json({ error: 'NOT_APPROVED', message: error.message });
+    }
+    console.error('Error setting active community:', error);
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to set active community', details: error.message });
   }
 });
 

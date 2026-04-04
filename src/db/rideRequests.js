@@ -76,16 +76,21 @@ async function updateRideRequestStatus(id, status) {
 }
 
 /**
- * Get the active ride request for a driver
- * NOTE: Driver assignments are stored in Redis, not in the ride_requests table.
- * This function is deprecated - use Redis key `ride:request:${requestId}:driver` instead.
- * @deprecated
+ * Get the active ride request for a driver.
+ * Queries the ride_requests table using the driver_id column (added 2026-02-14).
+ * @param {number|string} driverId - The driver's user ID
+ * @returns {Promise<Object|null>} The active ride request, or null if none
  */
 async function getActiveRideRequestForDriver(driverId) {
-  console.warn('[DEPRECATED] getActiveRideRequestForDriver: driver_id is stored in Redis, not PostgreSQL');
-  // This query won't work as driver_id column doesn't exist
-  // Keeping for backwards compatibility but it will return undefined
-  return undefined;
+  const result = await pool.query(
+    `SELECT * FROM ride_requests
+     WHERE driver_id = $1
+       AND status NOT IN ('completed', 'cancelled', 'interrupted', 'expired')
+     ORDER BY request_time DESC
+     LIMIT 1`,
+    [driverId]
+  );
+  return result.rows[0] || null;
 }
 
 /**

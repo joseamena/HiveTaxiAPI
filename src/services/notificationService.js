@@ -46,11 +46,17 @@ class NotificationService {
    */
   async _sendNotification(userId, title, body, data = {}) {
     try {
+      console.log(`[FCM] _sendNotification called for userId=${userId} (type: ${typeof userId})`);
       const user = await userDb.getUserById(Number(userId));
-      if (!user || !user.fcm_token) {
-        console.log(`User ${userId} not found or doesn't have FCM token`);
+      if (!user) {
+        console.warn(`[FCM] No user found for userId=${userId}`);
         return;
       }
+      if (!user.fcm_token) {
+        console.warn(`[FCM] User found but no FCM token | id=${user.id} username=${user.hive_username} type=${user.type}`);
+        return false;
+      }
+      console.log(`[FCM] User resolved | id=${user.id} username=${user.hive_username} type=${user.type} token_prefix=${user.fcm_token.slice(0, 20)}...`);
       const message = {
         token: user.fcm_token,
         notification: {
@@ -77,7 +83,7 @@ class NotificationService {
         console.warn(`⚠️  Firebase not configured, skipping FCM to user ${userId}`);
         return;
       }
-      console.log(`[FCM] Sending to user ${userId} | token: ${user.fcm_token}`);
+      console.log(`[FCM] Sending "${title}" to user ${userId} | token: ${user.fcm_token}`);
       const response = await admin.messaging().send(message);
       console.log(`FCM sent to user ${userId}:`, response);
     } catch (err) {
@@ -157,6 +163,7 @@ class NotificationService {
    * Send FCM notification to driver
    */
   async sendRideRequestToDriver(driverId, requestId, rideDetails) {
+    console.log(`[FCM] sendRideRequestToDriver | driverId=${driverId} (type: ${typeof driverId}) requestId=${requestId}`);
     // Construct trip object for notification
     const trip = {
       passengerPhone: rideDetails.passengerPhone,
@@ -193,6 +200,7 @@ class NotificationService {
     const driverQueueKey = `ride:request:${requestId}:queue`;
     const driverIds = nearbyDrivers.map(d => d.driverId);
 
+    console.log(`[queue] createDriverQueue for request ${requestId}: driverIds=${JSON.stringify(driverIds)}`);
     if (driverIds.length > 0) {
       // Push all driver IDs to the queue
       await redisClient.sendCommand(['RPUSH', driverQueueKey, ...driverIds]);
@@ -238,11 +246,18 @@ class NotificationService {
       return;
     }
 
-    console.log(`Notifying driver ${nextDriverId} for request ${requestId}`);
+    console.log(`[queue] Popped driverId=${nextDriverId} (type: ${typeof nextDriverId}) from queue for request ${requestId}`);
 
     try {
       // Send FCM notification to driver
-      await this.sendRideRequestToDriver(nextDriverId, requestId, rideDetails);
+      const sent = await this.sendRideRequestToDriver(nextDriverId, requestId, rideDetails);
+
+      if (sent === false) {
+        // Driver has no FCM token — skip immediately to the next driver
+        console.log(`[queue] Driver ${nextDriverId} has no FCM token, skipping to next driver for request ${requestId}`);
+        setImmediate(() => this.processDriverQueue(requestId, rideDetails));
+        return;
+      }
 
       // Set current driver and wait for response
       await redisClient.sendCommand(['SET', currentDriverKey, nextDriverId]);
@@ -448,6 +463,32 @@ class NotificationService {
   }
 
   /**
+   * Send a community status update FCM notification to a driver.
+   * Fired when a join request transitions from pending → approved or pending → declined.
+   * @param {number} driverId - The driver's user ID
+   * @param {string} communityId - The community hive tag (e.g. 'hive-138395')
+   * @param {string} communityName - Human-readable community name
+   * @param {'approved'|'declined'} status - New membership status
+   * @param {string|null} declineReason - Populated when status is 'declined'
+   */
+  async sendCommunityStatusUpdate(driverId, communityId, communityName, status, declineReason = null) {
+    const title = status === 'approved'
+      ? `You've been approved!`
+      : `Community request declined`;
+    const body = status === 'approved'
+      ? `You are now a member of ${communityName}.`
+      : `Your request to join ${communityName} was declined.`;
+    const data = {
+      type: 'community_status_update',
+      communityId: communityId.toString(),
+      communityName: communityName.toString(),
+      status: status.toString(),
+      declineReason: declineReason ? declineReason.toString() : ''
+    };
+    return this._sendNotification(driverId, title, body, data);
+  }
+
+  /**
    * Get request status
    */
   async getRequestStatus(requestId) {
@@ -466,6 +507,26 @@ class NotificationService {
       driverId,
       estimatedArrival: eta
     };
+  }
+
+  /**
+   * Notify a driver that their community membership status changed (approved or revoked).
+   * @param {number} userId
+   * @param {{ communityId: number, hiveTag: string, status: 'approved'|'revoked' }} opts
+   */
+  async sendCommunityStatusUpdate(userId, { communityId, hiveTag, status }) {
+    const isApproved = status === 'approved';
+    const title = isApproved ? 'Community Membership Approved' : 'Community Membership Revoked';
+    const body = isApproved
+      ? `You have been approved as a member of ${hiveTag}. You can now go online under this community.`
+      : `Your membership in ${hiveTag} has been revoked by the community operator.`;
+    const data = {
+      type: 'community_status_update',
+      communityId: communityId.toString(),
+      hiveTag,
+      status
+    };
+    return this._sendNotification(userId, title, body, data);
   }
 }
 

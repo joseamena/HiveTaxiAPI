@@ -181,18 +181,24 @@ async function updateFcmToken(userId, token) {
   try {
     await client.query('BEGIN');
     // Clear this token from any other user that currently holds it
-    await client.query(
-      `UPDATE users SET fcm_token = NULL WHERE fcm_token = $1 AND id != $2`,
+    const stealResult = await client.query(
+      `UPDATE users SET fcm_token = NULL WHERE fcm_token = $1 AND id != $2 RETURNING id, hive_username`,
       [token, userId]
     );
+    if (stealResult.rowCount > 0) {
+      const stolen = stealResult.rows.map(r => `${r.id} (${r.hive_username})`).join(', ');
+      console.log(`[FCM] Token stolen from user(s) ${stolen} and reassigned to user ${userId}`);
+    }
     // Set the token on the intended user
     const result = await client.query(
       `UPDATE users SET fcm_token = $1 WHERE id = $2 RETURNING *`,
       [token, userId]
     );
     await client.query('COMMIT');
+    console.log(`[FCM] Token stored in DB for user ${userId} (${result.rows[0]?.hive_username})`);
     return result.rows[0];
   } catch (err) {
+    console.error(`[FCM] DB error updating token for user ${userId}:`, err.message);
     await client.query('ROLLBACK');
     throw err;
   } finally {

@@ -39,6 +39,14 @@ app.get('/', (req, res) => {
   });
 });
 
+// Start background community sync (blockchain → DB membership status)
+const { startSyncJob } = require('./services/communitySync');
+startSyncJob();
+
+// Start background ride cleanup (expire stale pending, interrupt orphaned active rides)
+const { startCleanupJob } = require('./services/rideCleanup');
+startCleanupJob();
+
 // API Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/drivers', require('./routes/drivers'));

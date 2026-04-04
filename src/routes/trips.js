@@ -41,7 +41,8 @@ router.get('/active', authenticateJWT, async (req, res) => {
         longitude: activeRequest.dropoff_lng,
         address: activeRequest.dropoff_address
       },
-      finalFare: activeRequest.final_fare || activeRequest.proposed_fare || null
+      finalFare: activeRequest.final_fare || activeRequest.proposed_fare || null,
+      memo: activeRequest.memo || null
     };
     res.json({ active: true, trip });
   } catch (error) {
@@ -108,7 +109,7 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     
     // Get ride request from DB to obtain proposedFare and passenger info
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
-    const finalFare = rideRequest ? rideRequest.proposed_fare : null;
+    const finalFare = rideRequest && rideRequest.proposed_fare != null ? parseFloat(rideRequest.proposed_fare) : null;
     
     // Get driver's check-in permlink for the review chain
     let driverCheckin = null;
@@ -120,10 +121,10 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     // The rider will reply to the driver's check-in post on Hive blockchain
     if (rideRequest && rideRequest.passenger_id && driverCheckin && driverCheckin.permlink) {
       try {
-        // passenger_id is a username string, resolve to integer user ID for the ratings FK
-        const riderUser = await userDb.getUserByUsername(rideRequest.passenger_id);
+        // passenger_id is a numeric FK — resolve to user record for the ratings FK
+        const riderUser = await userDb.getUserById(Number(rideRequest.passenger_id));
         if (!riderUser) {
-          console.error('[trips.complete] Could not resolve rider username to ID:', rideRequest.passenger_id);
+          console.error('[trips.complete] Could not resolve rider ID:', rideRequest.passenger_id);
         } else {
           await ratingsDb.createPendingRating({
             rideRequestId: parseInt(id),
@@ -221,7 +222,7 @@ router.post('/:id/cancel', authenticateJWT, async (req, res) => {
 
     console.log('[trips.cancel] Cancel request received:', {
       tripId: id,
-      username,
+      userId,
       cancelledBy,
       reason
     });
@@ -979,7 +980,7 @@ router.post('/:id/payment-request', authenticateJWT, async (req, res) => {
 router.get('/:requestId/driver-location', authenticateJWT, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const riderId = req.user.username;
+    const riderId = req.user.id;
 
     // 1. Fetch trip from DB
     const trip = await rideRequestsDb.getRideRequestById(requestId);
