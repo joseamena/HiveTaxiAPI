@@ -105,7 +105,8 @@ router.post('/:id/complete', authenticateJWT, async (req, res) => {
     const rawResponses = await redisClient.lRange(`ride:request:${id}:responses`, 0, -1);
     const parsedResponses = rawResponses.map(r => JSON.parse(r));
     await rideRequestsDb.saveDriverResponses(id, parsedResponses);
-    await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'completed', 'EX', '3600']);
+    await redisClient.del(`ride:request:${id}:responses`);
     
     // Get ride request from DB to obtain proposedFare and passenger info
     const rideRequest = await rideRequestsDb.getRideRequestById(id);
@@ -232,7 +233,8 @@ router.post('/:id/cancel', authenticateJWT, async (req, res) => {
     const rawResponses = await redisClient.lRange(`ride:request:${id}:responses`, 0, -1);
     const parsedResponses = rawResponses.map(r => JSON.parse(r));
     await rideRequestsDb.saveDriverResponses(id, parsedResponses);
-    await redisClient.del(`ride:request:${id}:status`, `ride:request:${id}:responses`);
+    await redisClient.sendCommand(['SET', `ride:request:${id}:status`, 'cancelled', 'EX', '3600']);
+    await redisClient.del(`ride:request:${id}:responses`);
 
     // 6. Send FCM notification to the other party
     if (cancelledBy === 'passenger') {

@@ -376,6 +376,7 @@ class NotificationService {
       const data = {
         requestId: requestId.toString(),
         driverId: String(driverId),
+        driverName: driverName,
         type: 'ride_accepted',
         eta: estimatedArrival != null ? String(estimatedArrival) : ''
       };
@@ -502,9 +503,16 @@ class NotificationService {
       redisClient.sendCommand(['GET', etaKey])
     ]);
 
+    let driverName = null;
+    if (driverId) {
+      const driver = await userDb.getUserById(Number(driverId));
+      driverName = driver?.display_name || driver?.hive_username || null;
+    }
+
     return {
       status: status || 'pending',
       driverId,
+      driverName,
       estimatedArrival: eta
     };
   }
