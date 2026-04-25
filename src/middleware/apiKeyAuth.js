@@ -8,7 +8,7 @@ const pool = require('../db');
 async function authenticateAPIKey(req, res, next) {
   try {
     const apiKey = req.headers['x-api-key'];
-    
+
     if (!apiKey) {
       return res.status(401).json({
         error: 'MISSING_API_KEY',
